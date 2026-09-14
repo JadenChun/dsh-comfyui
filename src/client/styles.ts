@@ -62,6 +62,40 @@ select.dsc-input option { background: var(--dsw-alias-bg-layer-1); color: var(--
 .dsc-trigger:hover { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-layer-1); border-color: var(--dsw-alias-border-l1); }
 .dsc-trigger[aria-pressed='true'] { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-layer-2); }
 .dsc-trigger-glyph { font-size: 13px; line-height: 1; }
+/* --- connection reminder toast: fixed at the top of the page, mounted by the
+   header trigger when the backend probe cannot reach ComfyUI. The probing
+   state fades in after a short delay so a fast successful probe never paints;
+   the fail state is sticky until dismissed or a later probe recovers. --- */
+.dsc-conn-toast {
+  position: fixed; top: 14px; left: 50%;
+  z-index: 980;
+  display: flex; align-items: flex-start; gap: 10px;
+  max-width: min(560px, 92vw);
+  padding: 10px 12px;
+  background: var(--dsw-alias-bg-layer-2);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.3);
+  color: var(--dsw-alias-label-primary);
+  font-size: 12px; line-height: 1.5;
+  animation: dsc-conn-toast-in 0.16s ease-out both;
+}
+.dsc-conn-toast--probing { animation-delay: 0.45s; }
+.dsc-conn-toast--ok { border-color: var(--dsw-alias-state-success-primary); }
+.dsc-conn-toast--fail { border-color: var(--dsw-alias-state-error-primary); }
+.dsc-conn-toast-dot { flex: none; width: 8px; height: 8px; margin-top: 5px; border-radius: 50%; }
+.dsc-conn-toast--probing .dsc-conn-toast-dot { background: var(--dsw-alias-state-warn-primary); animation: dsc-conn-dot 1s ease-in-out infinite; }
+.dsc-conn-toast--ok .dsc-conn-toast-dot { background: var(--dsw-alias-state-success-primary); }
+.dsc-conn-toast--fail .dsc-conn-toast-dot { background: var(--dsw-alias-state-error-primary); }
+.dsc-conn-toast-body { min-width: 0; }
+.dsc-conn-toast-title { font-weight: 600; }
+.dsc-conn-toast--fail .dsc-conn-toast-title { color: var(--dsw-alias-state-error-primary); }
+.dsc-conn-toast--ok .dsc-conn-toast-title { color: var(--dsw-alias-state-success-primary); }
+.dsc-conn-toast-text { color: var(--dsw-alias-label-secondary); margin-top: 2px; overflow-wrap: anywhere; }
+.dsc-conn-toast-close { flex: none; border: none; background: transparent; color: var(--dsw-alias-label-tertiary); cursor: pointer; font-size: 13px; padding: 2px 4px; line-height: 1; }
+.dsc-conn-toast-close:hover { color: var(--dsw-alias-label-primary); }
+@keyframes dsc-conn-toast-in { from { opacity: 0; transform: translate(-50%, -6px); } to { opacity: 1; transform: translate(-50%, 0); } }
+@keyframes dsc-conn-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 /* --- panel shell: floating window, percentage-anchored to the page header
    (top) and the composer (bottom), draggable by the header and resizable via
    the corner handle. Follows the host light/dark theme. --- */
@@ -367,6 +401,28 @@ video.dsc-picker-player { max-height: 180px; }
 .dsc-param-random { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--dsw-alias-label-secondary); cursor: pointer; }
 .dsc-param-bool { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--dsw-alias-label-primary); cursor: pointer; }
 .dsc-param-advanced { display: flex; flex-direction: column; gap: 8px; border: 1px dashed var(--dsw-alias-border-l2); border-radius: 8px; padding: 8px; }
+/* --- workflow preset transfer dialogs (export / import) --- */
+.dsc-transfer { position: relative; display: flex; flex-direction: column; width: min(580px, 92vw); max-height: min(640px, 86vh); background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l2); border-radius: 12px; box-shadow: 0 16px 56px rgba(0, 0, 0, 0.5); overflow: hidden; }
+.dsc-transfer-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid var(--dsw-alias-border-l1); }
+.dsc-transfer-title { font-weight: 600; font-size: 13px; color: var(--dsw-alias-label-primary); }
+.dsc-transfer-body { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; overflow-y: auto; min-height: 0; }
+.dsc-transfer-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.dsc-transfer-list { display: flex; flex-direction: column; gap: 4px; }
+.dsc-transfer-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; cursor: pointer; font-size: 12px; color: var(--dsw-alias-label-primary); }
+.dsc-transfer-item:hover { border-color: var(--dsw-alias-brand-primary); }
+.dsc-transfer-item--static, .dsc-transfer-item--static:hover { cursor: default; border-color: var(--dsw-alias-border-l1); }
+.dsc-transfer-item--ok { border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 45%, transparent); }
+.dsc-transfer-item--fail { border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 45%, transparent); }
+.dsc-transfer-item-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 240px; }
+.dsc-transfer-item-desc { color: var(--dsw-alias-label-tertiary); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 40px; text-align: right; }
+.dsc-transfer-actions { display: flex; gap: 8px; justify-content: flex-end; padding: 10px 12px; border-top: 1px solid var(--dsw-alias-border-l1); }
+.dsc-transfer-note { padding: 6px 12px 0; }
+.dsc-transfer-note .dsc-hint { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dsc-transfer-drop { display: flex; align-items: center; justify-content: center; min-height: 150px; border: 1px dashed var(--dsw-alias-border-l2); border-radius: 10px; color: var(--dsw-alias-label-secondary); font-size: 13px; cursor: pointer; text-align: center; padding: 12px; transition: border-color 0.12s, color 0.12s; }
+.dsc-transfer-drop:hover, .dsc-transfer-drop--over { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); }
+.dsc-transfer-empty { padding: 40px 12px; text-align: center; color: var(--dsw-alias-label-tertiary); font-size: 13px; }
+.dsc-btn--primary { background: var(--dsw-alias-brand-primary); border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-bg-layer-1); }
+.dsc-btn--primary:disabled { opacity: 0.5; cursor: default; }
 `
 
 /** Inject the stylesheet once (idempotent), owned by this plugin for HMR. */

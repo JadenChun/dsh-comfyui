@@ -280,6 +280,50 @@ interface WorkflowDraft {
   updatedAt?: string
 }
 
+/** One workflow offered by an uploaded preset package (import analyze). */
+interface ImportCandidateView {
+  /** Position in the package manifest; apply selects by this index. */
+  index: number
+  id: string
+  name: string
+  description: string
+  tags: string[]
+  paramCount: number
+  skill: { fileCount: number; totalBytes: number; required: boolean } | null
+  warnings: string[]
+}
+
+/** Analyze reply for a preset package. */
+interface ImportAnalysisView {
+  version: number
+  exportedAt: string
+  pluginVersion: string
+  workflows: ImportCandidateView[]
+}
+
+/** Per-workflow result of an import apply. */
+interface ImportOutcomeView {
+  index: number
+  name: string
+  ok: boolean
+  newName?: string
+  error?: string
+  warnings: string[]
+}
+
+/** The server's record of the most recent export — the packaged facts the
+ * panel reports back, because the native form download hides the response.
+ * File name + size ride along so a stale download (download managers have
+ * already confused tasks on this setup) cannot masquerade as this export. */
+interface LastExport {
+  at: string
+  count: number
+  names: string[]
+  warnings: string[]
+  filename: string
+  size: number
+}
+
 function shortId(promptId: string): string {
   return promptId.length > 10 ? `${promptId.slice(0, 10)}…` : promptId
 }
@@ -2188,6 +2232,8 @@ function WorkflowsTab({ t }: ComfyUIPanelProps): ReturnType<typeof h> {
   const [busy, setBusy] = useState(false)
   const [viewing, setViewing] = useState<WorkflowViewState | null>(null)
   const [extract, setExtract] = useState<ExtractState | null>(null)
+  /** Open transfer dialog: 'export' | 'import', null = closed. */
+  const [transfer, setTransfer] = useState<'export' | 'import' | null>(null)
   const [tagFilter, setTagFilter] = useState<string | null>(null)
   const [skillFor, setSkillFor] = useState<WorkflowEntry | null>(null)
   /** A delete waiting on the user's answer about the workflow's skill pack. */
@@ -2381,6 +2427,21 @@ function WorkflowsTab({ t }: ComfyUIPanelProps): ReturnType<typeof h> {
   if (extract !== null) {
     return h(ExtractDialog, { t, state: extract, onUpdate: setExtract, onRun: (state) => runExtract(state), onClose: () => setExtract(null) })
   }
+  if (transfer === 'export') {
+    return h(ExportDialog, {
+      t,
+      workflows: list ?? [],
+      onClose: () => setTransfer(null),
+      onDone: (notice) => { setTransfer(null); setNotice(notice); void load() },
+    })
+  }
+  if (transfer === 'import') {
+    return h(ImportDialog, {
+      t,
+      onClose: () => setTransfer(null),
+      onDone: (notice) => { setTransfer(null); setNotice(notice); void load() },
+    })
+  }
   if (error !== null) return h('div', null, h(ErrorNote, { t, message: error }))
   if (list === null) return h('div', { className: 'dsc-meta' }, '…')
 
@@ -2534,6 +2595,8 @@ function WorkflowsTab({ t }: ComfyUIPanelProps): ReturnType<typeof h> {
           },
         }),
       ),
+      h('button', { className: 'dsc-btn', disabled: busy, onClick: () => { setError(null); setTransfer('export') } }, t('exportPresets')),
+      h('button', { className: 'dsc-btn', disabled: busy, onClick: () => { setError(null); setTransfer('import') } }, t('importPresets')),
       h('button', { className: 'dsc-btn', disabled: busy, onClick: () => void load() }, t('wfRefresh')),
     ),
     notice !== null ? h('div', { className: 'dsc-ok' }, notice) : null,
@@ -2614,6 +2677,382 @@ function ExtractDialog(props: {
             h('button', { className: 'dsc-btn', onClick: onClose }, t('wfCancel')),
           ),
         ),
+  )
+}
+
+/** Shared checkbox row for the transfer dialogs: name, badges, description. */
+function TransferItem(props: {
+  name: string
+  description: string
+  paramBadge: string | null
+  skillBadge: string | null
+  warnings: string[]
+  checked: boolean
+  onToggle: () => void
+}): ReturnType<typeof h> {
+  return h('label', { className: 'dsc-transfer-item' },
+    h('input', { type: 'checkbox', checked: props.checked, onChange: props.onToggle }),
+    h('span', { className: 'dsc-transfer-item-name', title: props.name }, props.name),
+    props.paramBadge !== null ? h('span', { className: 'dsc-badge' }, props.paramBadge) : null,
+    props.skillBadge !== null ? h('span', { className: 'dsc-badge dsc-badge--ok' }, props.skillBadge) : null,
+    props.description !== ''
+      ? h('span', { className: 'dsc-transfer-item-desc', title: props.description }, props.description)
+      : null,
+    props.warnings.length > 0
+      ? h('span', { className: 'dsc-transfer-item-desc dsc-danger-text', title: props.warnings.join('；') }, props.warnings.join('；'))
+      : null,
+  )
+}
+
+/** While a transfer dialog is open, swallow drag events aimed at the host
+ * page. The conversation shell attaches dropped files to the chat with
+ * document-level bubble listeners, so dragging a preset toward the dialog
+ * also dropped it into the conversation. Window-capture listeners run before
+ * any document-bubble handler and shield everything OUTSIDE the dialog;
+ * events landing inside the dialog pass through — the dialog box itself must
+ * stopPropagation() them at React's dispatch root, or they bubble on to the
+ * document and the shell attaches the file anyway. */
+function DragGuard(): null {
+  useEffect(() => {
+    const guard = (event: DragEvent): void => {
+      if (event.target instanceof Element && event.target.closest('.dsc-transfer') !== null) return
+      event.preventDefault()
+      event.stopPropagation()
+    }
+    for (const type of ['dragenter', 'dragover', 'drop'] as const) window.addEventListener(type, guard, true)
+    return () => {
+      for (const type of ['dragenter', 'dragover', 'drop'] as const) window.removeEventListener(type, guard, true)
+    }
+  }, [])
+  return null
+}
+
+/** Export dialog: pick library workflows (checkboxes + select-all, all
+ * pre-selected) and download one preset package. Packaging happens host-side;
+ * the dialog lists, selects, and submits a native form download. */
+function ExportDialog(props: {
+  t: ComfyUIPanelProps['t']
+  workflows: WorkflowEntry[]
+  onClose: () => void
+  onDone: (notice: string) => void
+}): ReturnType<typeof h> {
+  const { t, workflows } = props
+  const [selected, setSelected] = useState<Set<string>>(() => new Set(workflows.map((workflow) => workflow.id)))
+  const [busy, setBusy] = useState(false)
+
+  const toggle = (id: string): void => {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+  const allSelected = workflows.length > 0 && selected.size === workflows.length
+  const toggleAll = (): void => {
+    setSelected(allSelected ? new Set() : new Set(workflows.map((workflow) => workflow.id)))
+  }
+
+  /** Download natively: a hidden form GETs `/comfyui/workflows/export/<file
+   * name>?ids=…` and the server answers with `content-disposition:
+   * attachment`, so the browser — not JS blob plumbing (fetch → blob →
+   * objectURL → revoke, which one environment turned into a 0-byte file) —
+   * owns the transfer. The page never navigates because the response is an
+   * attachment.
+   *
+   * GET with the name in the path is deliberate: this setup's download
+   * manager mangles POST downloads (renames them, or re-fetches the URL on
+   * its own), which is where the phantom "skills sometimes missing" zips
+   * came from. A GET is the one verb every manager handles correctly — and
+   * since the name rides in the URL, saved name == receipt name even under
+   * interception, and a manager's own re-fetch still gets a genuine export
+   * of the same ids (the route is a pure read).
+   *
+   * The form response is invisible to JS, so the notice is fed from
+   * `export/last` — the server's record of what it ACTUALLY packaged — not
+   * from the checkboxes. */
+  const exportSelected = (): void => {
+    if (busy) return
+    setBusy(true)
+    void (async () => {
+      let previousAt: string | null = null
+      try {
+        const before = await getJson<{ last: LastExport | null }>('/comfyui/workflows/export/last')
+        previousAt = before.last?.at ?? null
+      } catch { /* first export ever, or a blip — polling below still works */ }
+      const now = new Date()
+      const p = (n: number, width = 2): string => String(n).padStart(width, '0')
+      const filename = `dsh-comfyui-presets-${now.getFullYear()}${p(now.getMonth() + 1)}${p(now.getDate())}-${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}-${p(now.getMilliseconds(), 3)}-${Math.random().toString(36).slice(2, 8)}.zip`
+      const form = document.createElement('form')
+      form.method = 'GET'
+      form.action = `/comfyui/workflows/export/${filename}`
+      form.style.display = 'none'
+      for (const id of selected) {
+        const input = document.createElement('input')
+        input.type = 'hidden'
+        input.name = 'ids'
+        input.value = id
+        form.append(input)
+      }
+      document.body.append(form)
+      form.submit()
+      form.remove()
+      // Poll briefly for the record of THIS export (a big pack takes a
+      // second or two to zip); fall back to the client's own selection.
+      let last: LastExport | null = null
+      for (let attempt = 0; attempt < 10 && last === null; attempt++) {
+        await new Promise((resolve) => window.setTimeout(resolve, 350))
+        try {
+          const payload = await getJson<{ last: LastExport | null }>('/comfyui/workflows/export/last')
+          if (payload.last !== null && payload.last.at !== previousAt) last = payload.last
+        } catch { /* retried below */ }
+      }
+      const names = (last?.names ?? selectedNames()).join('、')
+      let notice = t('transferExportDone', { n: last?.count ?? selected.size, names })
+      // The file fingerprint: whatever the user opens must match this name
+      // (and roughly this size) — anything else is an older download.
+      if (last !== null) notice += ' ' + t('transferExportFile', { file: last.filename, size: Math.max(1, Math.round(last.size / 1024)) })
+      if (last !== null && last.warnings.length > 0) notice += ' ' + t('transferExportWarnings', { warnings: last.warnings.join('；') })
+      props.onDone(notice)
+    })()
+  }
+
+  /** Names behind the current selection, dialog order, with pack-bearing
+   * entries annotated. Shown next to the submit button so "what will be
+   * packaged — and will it carry skills" is readable at the decision point:
+   * a selection that happens to exclude the one pack-bearing workflow looks
+   * exactly like "skills export unreliably" from the zip alone. */
+  const selectedNames = (): string[] =>
+    workflows
+      .filter((workflow) => selected.has(workflow.id))
+      .map((workflow) => (workflow.skillDir !== undefined ? `${workflow.name} (${t('skillBadge')})` : workflow.name))
+
+  return h('div', { className: 'dsc-picker-overlay', onClick: props.onClose },
+    h(DragGuard),
+    h('div', {
+      className: 'dsc-transfer',
+      onClick: (event: { stopPropagation: () => void }) => event.stopPropagation(),
+      // Absorb drag events inside the dialog: without stopPropagation they
+      // bubble past React's dispatch root to the document, where the shell's
+      // composer listeners attach the file to the conversation.
+      onDragEnter: (event: { preventDefault: () => void; stopPropagation: () => void }) => { event.preventDefault(); event.stopPropagation() },
+      onDragOver: (event: { preventDefault: () => void; stopPropagation: () => void }) => { event.preventDefault(); event.stopPropagation() },
+      onDrop: (event: { preventDefault: () => void; stopPropagation: () => void }) => { event.preventDefault(); event.stopPropagation() },
+    },
+      h('div', { className: 'dsc-transfer-head' },
+        h('span', { className: 'dsc-transfer-title' }, t('transferExportTitle')),
+        h('button', { className: 'dsc-panel-close', 'aria-label': t('close'), onClick: props.onClose }, '✕'),
+      ),
+      workflows.length === 0
+        ? h('div', { className: 'dsc-transfer-empty' }, t('transferExportEmpty'))
+        : h('div', { className: 'dsc-transfer-body' },
+            h('div', { className: 'dsc-transfer-bar' },
+              h('span', { className: 'dsc-hint' }, t('transferExportHint', { total: workflows.length, selected: selected.size })),
+              h('button', { className: 'dsc-btn dsc-btn--sm', onClick: toggleAll }, allSelected ? t('transferSelectNone') : t('transferSelectAll')),
+            ),
+            h('div', { className: 'dsc-transfer-list' },
+              workflows.map((workflow) => h(TransferItem, {
+                key: workflow.id,
+                name: workflow.name,
+                description: workflow.description,
+                paramBadge: (workflow.parameters ?? []).length > 0 ? t('transferParamBadge', { n: (workflow.parameters ?? []).length }) : null,
+                skillBadge: workflow.skillDir !== undefined ? t('skillBadge') : null,
+                warnings: [],
+                checked: selected.has(workflow.id),
+                onToggle: () => toggle(workflow.id),
+              })),
+            ),
+          ),
+      selected.size > 0
+        ? h('div', { className: 'dsc-transfer-note' },
+            h('span', { className: 'dsc-hint', title: selectedNames().join('、') },
+              t('transferSelectedList', { names: selectedNames().join('、') })))
+        : null,
+      h('div', { className: 'dsc-transfer-actions' },
+        workflows.length === 0
+          ? null
+          : h('button', {
+              className: 'dsc-btn dsc-btn--primary',
+              disabled: busy || selected.size === 0,
+              onClick: () => exportSelected(),
+            }, busy ? t('transferExporting') : t('transferExportRun', { n: selected.size })),
+        h('button', { className: 'dsc-btn', disabled: busy, onClick: props.onClose }, t('cancel')),
+      ),
+    ),
+  )
+}
+
+/** Import dialog: choose a preset package (file picker or drag-drop), see
+ * what it offers, then import the selection as NEW workflows. The file is
+ * POSTed twice by design — analyze and apply parse the same bytes, so the
+ * host needs no temp-file staging or cleanup. */
+function ImportDialog(props: {
+  t: ComfyUIPanelProps['t']
+  onClose: () => void
+  onDone: (notice: string) => void
+}): ReturnType<typeof h> {
+  const { t } = props
+  const [file, setFile] = useState<File | null>(null)
+  const [analysis, setAnalysis] = useState<ImportAnalysisView | null>(null)
+  const [selected, setSelected] = useState<Set<number>>(new Set())
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [results, setResults] = useState<ImportOutcomeView[] | null>(null)
+  const [imported, setImported] = useState(0)
+  const [dragOver, setDragOver] = useState(false)
+
+  /** Phase 1: upload the package for analysis (no server-side writes). */
+  const analyze = async (picked: File): Promise<void> => {
+    setBusy(true)
+    setError(null)
+    try {
+      const bytes = await picked.arrayBuffer()
+      const data = await postRaw('/comfyui/workflows/import/analyze', bytes) as { ok?: boolean; analysis?: ImportAnalysisView; error?: string }
+      if (data.ok !== true || data.analysis === undefined) throw new Error(data.error ?? 'failed to analyze')
+      setFile(picked)
+      setAnalysis(data.analysis)
+      setSelected(new Set(data.analysis.workflows.map((entry) => entry.index)))
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const toggle = (index: number): void => {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(index)) next.delete(index)
+      else next.add(index)
+      return next
+    })
+  }
+  const allSelected = analysis !== null && analysis.workflows.length > 0 && selected.size === analysis.workflows.length
+  const toggleAll = (): void => {
+    if (analysis === null) return
+    setSelected(allSelected ? new Set() : new Set(analysis.workflows.map((entry) => entry.index)))
+  }
+
+  /** Phase 2: re-upload the same bytes with the selection as manifest indexes. */
+  const importSelected = async (): Promise<void> => {
+    if (file === null) return
+    setBusy(true)
+    setError(null)
+    try {
+      const bytes = await file.arrayBuffer()
+      const query = [...selected].join(',')
+      const data = await postRaw(`/comfyui/workflows/import/apply?select=${query}`, bytes) as { ok?: boolean; results?: ImportOutcomeView[]; imported?: number; error?: string }
+      if (data.ok !== true || data.results === undefined) throw new Error(data.error ?? 'failed to import')
+      setResults(data.results)
+      setImported(data.imported ?? 0)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const finish = (): void => {
+    if (imported > 0) props.onDone(t('transferImportDone', { n: imported }))
+    else props.onClose()
+  }
+
+  return h('div', { className: 'dsc-picker-overlay', onClick: props.onClose },
+    h(DragGuard),
+    h('div', {
+      className: 'dsc-transfer',
+      onClick: (event: { stopPropagation: () => void }) => event.stopPropagation(),
+      // Absorb drag events inside the dialog: without stopPropagation they
+      // bubble past React's dispatch root to the document, where the shell's
+      // composer listeners attach the file to the conversation.
+      onDragEnter: (event: { preventDefault: () => void; stopPropagation: () => void }) => { event.preventDefault(); event.stopPropagation() },
+      onDragOver: (event: { preventDefault: () => void; stopPropagation: () => void }) => { event.preventDefault(); event.stopPropagation() },
+      onDrop: (event: { preventDefault: () => void; stopPropagation: () => void }) => { event.preventDefault(); event.stopPropagation() },
+    },
+      h('div', { className: 'dsc-transfer-head' },
+        h('span', { className: 'dsc-transfer-title' }, t('transferImportTitle')),
+        h('button', { className: 'dsc-panel-close', 'aria-label': t('close'), onClick: props.onClose }, '✕'),
+      ),
+      h('div', { className: 'dsc-transfer-body' },
+        results !== null
+          ? h('div', { className: 'dsc-transfer-list' },
+              results.map((outcome) => h('div', {
+                key: outcome.index,
+                className: `dsc-transfer-item dsc-transfer-item--static${outcome.ok ? ' dsc-transfer-item--ok' : ' dsc-transfer-item--fail'}`,
+              },
+                h('span', { className: 'dsc-transfer-item-name', title: outcome.name },
+                  outcome.ok
+                    ? t('transferImportedItem', { src: outcome.name, dst: outcome.newName ?? '' })
+                    : t('transferImportFailedItem', { src: outcome.name, reason: outcome.error ?? '' }),
+                ),
+                outcome.warnings.length > 0
+                  ? h('span', { className: 'dsc-transfer-item-desc', title: outcome.warnings.join('；') }, outcome.warnings.join('；'))
+                  : null,
+              )),
+            )
+          : analysis === null
+            ? h('label', {
+                className: `dsc-transfer-drop${dragOver ? ' dsc-transfer-drop--over' : ''}`,
+                onDragOver: (event: { preventDefault: () => void }) => { event.preventDefault(); setDragOver(true) },
+                onDragLeave: () => setDragOver(false),
+                onDrop: (event: { preventDefault: () => void; dataTransfer?: { files?: File[] } }) => {
+                  event.preventDefault()
+                  setDragOver(false)
+                  const dropped = event.dataTransfer?.files?.[0]
+                  if (dropped !== undefined) void analyze(dropped)
+                },
+              },
+                h('input', {
+                  type: 'file',
+                  accept: '.zip,application/zip,application/x-zip-compressed',
+                  style: { display: 'none' },
+                  onChange: (event: { target: HTMLInputElement }) => {
+                    const picked = event.target.files?.[0]
+                    if (picked !== undefined) void analyze(picked)
+                    event.target.value = ''
+                  },
+                }),
+                busy ? t('transferImporting') : t('transferPickFile'),
+              )
+            : h('div', { className: 'dsc-transfer-body' },
+                h('div', { className: 'dsc-transfer-bar' },
+                  h('span', { className: 'dsc-hint' }, t('transferPackageInfo', { n: analysis.workflows.length, date: formatTs(analysis.exportedAt) })),
+                  h('button', { className: 'dsc-btn dsc-btn--sm', onClick: toggleAll }, allSelected ? t('transferSelectNone') : t('transferSelectAll')),
+                ),
+                h('div', { className: 'dsc-transfer-list' },
+                  analysis.workflows.map((entry) => h(TransferItem, {
+                    key: entry.index,
+                    name: entry.name,
+                    description: entry.description,
+                    paramBadge: entry.paramCount > 0 ? t('transferParamBadge', { n: entry.paramCount }) : null,
+                    skillBadge: entry.skill !== null
+                      ? (entry.skill.required
+                          ? t('transferSkillRequired', { n: entry.skill.fileCount })
+                          : t('transferSkillBadge', { n: entry.skill.fileCount }))
+                      : null,
+                    warnings: entry.warnings,
+                    checked: selected.has(entry.index),
+                    onToggle: () => toggle(entry.index),
+                  })),
+                ),
+              ),
+        error !== null ? h(ErrorNote, { t, message: error }) : null,
+        analysis !== null && results === null ? h('div', { className: 'dsc-hint' }, t('transferImportNote')) : null,
+        analysis === null && results === null ? h('div', { className: 'dsc-hint' }, t('transferPickHint')) : null,
+      ),
+      h('div', { className: 'dsc-transfer-actions' },
+        results !== null
+          ? h('button', { className: 'dsc-btn dsc-btn--primary', onClick: finish }, t('transferFinish'))
+          : analysis !== null
+            ? h('button', {
+                className: 'dsc-btn dsc-btn--primary',
+                disabled: busy || selected.size === 0,
+                onClick: () => { void importSelected() },
+              }, busy ? t('transferImporting') : t('transferImportRun', { n: selected.size }))
+            : null,
+        h('button', { className: 'dsc-btn', disabled: busy, onClick: results !== null ? finish : props.onClose }, t('cancel')),
+      ),
+    ),
   )
 }
 

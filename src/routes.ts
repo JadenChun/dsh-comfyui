@@ -12,6 +12,7 @@ import { analyzeWorkflowParameters, comboChildInfo, inputOptions, numberSpecOf, 
 import { collectMedia, historyErrorMessage, mediaProxyUrl, type ComfyUIMediaRef } from './comfyui.js'
 import type { AssetRecord } from './store.js'
 import { MAX_ASSET_BYTES, SKILL_MAIN, SKILL_PRESET_DIRS, joinFrontmatter, splitFrontmatter } from './skillpack.js'
+import { MAX_IMPORT_BYTES, analyzeImportPackage, applyImportPackage, buildExportPackage } from './transfer.js'
 import { unlink } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
@@ -957,6 +958,187 @@ export function mountComfyUIRoutes(ctx: Context, runtime: ComfyUIRuntime): (() =
       if (body.deleteSkill === true) await runtime.skillPacks.destroy(id).catch(() => undefined)
       await runtime.deleteWorkflow(id)
       sendJson(response, 200, { ok: true })
+    }),
+  }))
+
+  // ── Workflow preset transfer (export / import) ──────────────────────────
+  // Export bundles selected library workflows (API format) with their
+  // parameters and skill packs into one .zip download; import parses an
+  // uploaded package and then writes the selection back as NEW workflows.
+  // The packaging, validation and pack writes live in transfer.ts — these
+  // routes only shape HTTP (same-origin, body cap, content types).
+  //
+  // The export body comes in two shapes on purpose: JSON `{ ids }` from a
+  // fetch caller, and an urlencoded form (`ids` repeated) from the panel's
+  // hidden-form submit — the panel downloads natively so the browser, not
+  // JS blob plumbing, owns the whole transfer.
+  //
+  // The native form download means the panel never sees the response body,
+  // so the facts of the last package ride back through `export/last`: the
+  // panel reads it right after submitting and reports what was ACTUALLY
+  // packaged, not what the checkboxes believed.
+  let lastExport: { at: string; count: number; names: string[]; warnings: string[]; filename: string; size: number } | null = null
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/comfyui/workflows/export/last',
+    handler: withHint(async (request, response) => {
+      if (!methodIs(request, 'GET')) {
+        sendJson(response, 405, { error: 'method not allowed' })
+        return
+      }
+      sendJson(response, 200, { last: lastExport })
+    }),
+  }))
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/comfyui/workflows/export',
+    handler: withHint(async (request, response) => {
+      if (!methodIs(request, 'POST')) {
+        sendJson(response, 405, { error: 'method not allowed' })
+        return
+      }
+      let ids: unknown
+      const contentType = String(request.headers['content-type'] ?? '')
+      if (contentType.includes('application/x-www-form-urlencoded')) {
+        if (!sameOrigin(request)) {
+          sendJson(response, 403, { error: 'forbidden: same-origin requests only' })
+          return
+        }
+        const raw = await readRawBody(request)
+        ids = [...new URLSearchParams(raw.toString('utf8')).getAll('ids')]
+      } else {
+        const body = await readSameOriginPost(request, response)
+        if (body === undefined) return
+        ids = body.ids
+      }
+      const result = await buildExportPackage(runtime, ids)
+      if (!result.ok) {
+        sendJson(response, 400, { error: result.error })
+        return
+      }
+      // Audit trail on purpose: download managers dedupe by URL, so "which
+      // file is which" became a live user question — the log answers it with
+      // the exact packaged set per request, and the receipt the panel shows
+      // carries the file name + size so a stale download can't masquerade as
+      // this export.
+      lastExport = { at: new Date().toISOString(), count: result.count, names: result.names, warnings: result.warnings, filename: result.filename, size: result.bytes.length }
+      ctx.logger.info(`comfyui: 导出 ${result.count} 个工作流 → ${result.filename}（${result.names.join('、')}）${result.warnings.length > 0 ? ` 警告：${result.warnings.join('；')}` : ''}`)
+      response.writeHead(200, {
+        'content-type': 'application/zip',
+        'content-length': String(result.bytes.length),
+        'cache-control': 'no-store',
+        // ASCII file name on purpose: it rides a Content-Disposition header
+        // without RFC 5987 encoding and stays readable on every OS.
+        'content-disposition': `attachment; filename="${result.filename}"`,
+      })
+      response.end(result.bytes)
+    }),
+  }))
+
+  // Native GET download: the file name rides IN the URL path. A download
+  // manager that derives the saved name from the URL, or re-fetches the URL
+  // itself, still lands on the correct name — and because the export is a
+  // pure read, on the genuine bytes for exactly these ids. This is the
+  // antidote to the intercepted-POST downloads that kept saving stale or
+  // renamed files on one setup (skills "sometimes missing" was those files).
+  // Exact routes above win for `/export` and `/export/last`; this prefix only
+  // sees `/export/<filename>`.
+  disposers.push(webServer.register({
+    kind: 'prefix',
+    path: '/comfyui/workflows/export',
+    handler: withHint(async (request, response) => {
+      if (!methodIs(request, 'GET')) {
+        sendJson(response, 405, { error: 'method not allowed' })
+        return
+      }
+      const url = new URL(request.url ?? '/', 'http://localhost')
+      const filename = decodeURIComponent(url.pathname.slice('/comfyui/workflows/export/'.length))
+      // The name is client-supplied but strictly patterned: it only ever
+      // feeds a header value and the receipt, never a filesystem path.
+      if (!/^dsh-comfyui-presets-[0-9A-Za-z-]+\.zip$/.test(filename)) {
+        sendJson(response, 400, { error: 'bad export file name' })
+        return
+      }
+      const result = await buildExportPackage(runtime, url.searchParams.getAll('ids'))
+      if (!result.ok) {
+        sendJson(response, 400, { error: result.error })
+        return
+      }
+      lastExport = { at: new Date().toISOString(), count: result.count, names: result.names, warnings: result.warnings, filename, size: result.bytes.length }
+      ctx.logger.info(`comfyui: 导出 ${result.count} 个工作流 → ${filename}（${result.names.join('、')}）${result.warnings.length > 0 ? ` 警告：${result.warnings.join('；')}` : ''}`)
+      response.writeHead(200, {
+        'content-type': 'application/zip',
+        'content-length': String(result.bytes.length),
+        'cache-control': 'no-store',
+        'content-disposition': `attachment; filename="${filename}"`,
+      })
+      response.end(result.bytes)
+    }),
+  }))
+
+  // Import is two-phase with zero server-side staging: analyze parses the
+  // uploaded bytes and lists what the package offers; apply re-reads the
+  // same bytes the client still holds and writes the selection. Selection
+  // travels by manifest index (stable, because the same bytes are parsed
+  // again), which avoids URL-encoding arbitrary package ids.
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/comfyui/workflows/import/analyze',
+    handler: withHint(async (request, response) => {
+      if (!methodIs(request, 'POST')) {
+        sendJson(response, 405, { error: 'method not allowed' })
+        return
+      }
+      if (!sameOrigin(request)) {
+        sendJson(response, 403, { error: 'forbidden: same-origin requests only' })
+        return
+      }
+      const raw = await readRawBody(request)
+      if (raw.length > MAX_IMPORT_BYTES) {
+        sendJson(response, 413, { error: `预设包不能超过 ${Math.floor(MAX_IMPORT_BYTES / 1024 / 1024)} MB` })
+        return
+      }
+      const result = analyzeImportPackage(raw)
+      if (!result.ok) {
+        sendJson(response, 400, { error: result.error })
+        return
+      }
+      sendJson(response, 200, result)
+    }),
+  }))
+
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/comfyui/workflows/import/apply',
+    handler: withHint(async (request, response) => {
+      if (!methodIs(request, 'POST')) {
+        sendJson(response, 405, { error: 'method not allowed' })
+        return
+      }
+      if (!sameOrigin(request)) {
+        sendJson(response, 403, { error: 'forbidden: same-origin requests only' })
+        return
+      }
+      const url = new URL(request.url ?? '/', 'http://localhost')
+      const selected = (url.searchParams.get('select') ?? '')
+        .split(',')
+        .map((part) => Number.parseInt(part, 10))
+        .filter((index) => Number.isInteger(index) && index >= 0)
+      const raw = await readRawBody(request)
+      if (raw.length > MAX_IMPORT_BYTES) {
+        sendJson(response, 413, { error: `预设包不能超过 ${Math.floor(MAX_IMPORT_BYTES / 1024 / 1024)} MB` })
+        return
+      }
+      try {
+        const result = await applyImportPackage(runtime, raw, selected)
+        if (!result.ok) {
+          sendJson(response, 400, { error: result.error })
+          return
+        }
+        sendJson(response, 200, result)
+      } catch (error) {
+        sendJson(response, 500, { error: errorMessage(error) })
+      }
     }),
   }))
 

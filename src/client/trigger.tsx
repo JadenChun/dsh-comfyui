@@ -1,9 +1,11 @@
 /**
  * The session-header trigger (conversation.session.header.actions, id
- * 'comfyui'): a labelled button that toggles the ComfyUI panel.
+ * 'comfyui'): a labelled button that toggles the ComfyUI panel, plus the
+ * connection reminder toast shown when the backend cannot reach ComfyUI.
  */
-import { createElement as h } from 'react'
+import { Fragment, createElement as h } from 'react'
 import { panelStore, usePanelOpen } from './panel-store.ts'
+import { ConnectionToast, probeConnection } from './connection.tsx'
 
 export interface ComfyUITriggerProps {
   t: (key: string, ...rest: unknown[]) => string
@@ -24,17 +26,26 @@ export function ComfyUIIcon(): ReturnType<typeof h> {
   )
 }
 
-/** Header-action button toggling the ComfyUI panel. */
+/** Header-action button toggling the ComfyUI panel. Opening it also fires a
+ * backend connectivity probe: when ComfyUI is down, a reminder toast explains
+ * why the panel stays empty instead of the click appearing to do nothing. */
 export function ComfyUITrigger({ t }: ComfyUITriggerProps): ReturnType<typeof h> {
   const open = usePanelOpen()
-  return h('button', {
-    className: 'dsc-trigger',
-    title: t('panelTitle'),
-    'aria-label': t('panelTitle'),
-    'aria-pressed': open,
-    onClick: () => panelStore.toggle(),
-  },
-    h('span', { className: 'dsc-trigger-glyph' }, h(ComfyUIIcon)),
-    h('span', null, t('panelTitle')),
+  return h(Fragment, null,
+    h('button', {
+      className: 'dsc-trigger',
+      title: t('panelTitle'),
+      'aria-label': t('panelTitle'),
+      'aria-pressed': open,
+      onClick: () => {
+        const opening = !panelStore.isOpen()
+        panelStore.toggle()
+        if (opening) void probeConnection()
+      },
+    },
+      h('span', { className: 'dsc-trigger-glyph' }, h(ComfyUIIcon)),
+      h('span', null, t('panelTitle')),
+    ),
+    h(ConnectionToast, { t }),
   )
 }

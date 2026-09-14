@@ -23,7 +23,7 @@
  * follows.
  */
 import { mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } from 'node:fs/promises'
-import { isAbsolute, join, relative, resolve } from 'node:path'
+import { isAbsolute, dirname, join, relative, resolve } from 'node:path'
 
 /**
  * Sub-directories offered by default. These are suggestions, not a whitelist:
@@ -60,12 +60,27 @@ export const MAX_FILE_BYTES = 256 * 1024
  * they get a larger budget than the documents the model reads verbatim. */
 export const MAX_ASSET_BYTES = 4 * 1024 * 1024
 
-/** A pack is documentation, not storage — these caps keep it that way. */
-export const MAX_PACK_FILES = 100
+/** A pack is documentation, not storage — these caps keep it that way. The
+ * byte cap is the real storage guard; the file count only stops pathological
+ * noise, so it sits well above real bulk-copied packs (a ComfyUI music
+ * template library lands at 1000+ small .txt files and MUST survive a
+ * preset export → import round trip). */
+export const MAX_PACK_FILES = 2000
 export const MAX_PACK_BYTES = 20 * 1024 * 1024
 
-/** File names: letters, digits, CJK, dot, dash, underscore. No separators, no leading dot. */
-const FILE_NAME = /^[A-Za-z0-9_一-龥][A-Za-z0-9._一-龥-]{0,63}$/
+/** Per-file size budget by extension: binaries never enter the prompt as
+ * text, so they get the larger budget wherever they live. Exported because
+ * the preset importer pre-filters oversized files per file (skip + warning)
+ * before handing the batch to {@link SkillPackStore.writeMany}. */
+export function sizeLimitOf(file: string): number {
+  return ASSET_EXTENSIONS.includes(extensionOf(file)) ? MAX_ASSET_BYTES : MAX_FILE_BYTES
+}
+
+/** File names: letters, digits, CJK, dot, dash, underscore. No separators, no
+ * leading dot. 128 chars, not 64: bulk-copied packs carry long descriptive
+ * template names ("c-pop-guofeng-traditional-chinese-style-cinematic-ballad"),
+ * and a cap they fail makes those files silently invisible to info()/export. */
+const FILE_NAME = /^[A-Za-z0-9_一-龥][A-Za-z0-9._一-龥-]{0,127}$/
 
 /** Directory names this module generates and later trusts only after re-validation. */
 const SLUG = /^[a-z0-9][a-z0-9-]{0,79}$/
@@ -503,6 +518,49 @@ export class SkillPackStore {
     return this.info(slug)
   }
 
+  /** Bulk write for preset restore: ONE limit check for the whole batch
+   * instead of per-file enumeration. Per-file checks re-count the entire
+   * pack on every write, so restoring a 1000-file pack that way is O(n²)
+   * filesystem calls — a frozen-looking import for minutes. Grammar and
+   * per-file size limits are still enforced here; the batch is refused
+   * whole (the caller reports which file tripped), never written partially. */
+  async writeMany(slug: string, entries: ReadonlyArray<{ path: string; bytes: Buffer }>): Promise<SkillPackResult<SkillPackInfo>> {
+    if (entries.length === 0) return this.info(slug)
+    const before = await this.info(slug)
+    if (!before.ok) return before
+    const existingByPath = new Map(before.value.files.map((file) => [file.path, file.size]))
+    let existingReplacedBytes = 0
+    let incomingBytes = 0
+    let newCount = 0
+    const plan: Array<{ target: string; bytes: Buffer }> = []
+    for (const entry of entries) {
+      const target = this.fileOf(slug, entry.path)
+      if (!target.ok) return target
+      const parsed = parseSkillPath(entry.path)
+      if (!parsed.ok) return parsed
+      const limit = ASSET_EXTENSIONS.includes(extensionOf(parsed.value.file)) ? MAX_ASSET_BYTES : MAX_FILE_BYTES
+      if (entry.bytes.length > limit) {
+        return fail(`单个文件不能超过 ${Math.floor(limit / 1024)} KB（${entry.path} 当前 ${Math.ceil(entry.bytes.length / 1024)} KB）`)
+      }
+      const existingSize = existingByPath.get(entry.path)
+      if (existingSize === undefined) newCount += 1
+      else existingReplacedBytes += existingSize
+      incomingBytes += entry.bytes.length
+      plan.push({ target: target.value, bytes: entry.bytes })
+    }
+    if (before.value.files.length + newCount > MAX_PACK_FILES) {
+      return fail(`一个技能包最多 ${MAX_PACK_FILES} 个文件`)
+    }
+    if (before.value.totalBytes - existingReplacedBytes + incomingBytes > MAX_PACK_BYTES) {
+      return fail(`一个技能包最多 ${Math.floor(MAX_PACK_BYTES / 1024 / 1024)} MB`)
+    }
+    for (const item of plan) {
+      await mkdir(dirname(item.target), { recursive: true })
+      await writeFile(item.target, item.bytes)
+    }
+    return this.info(slug)
+  }
+
   /** Read one file as raw bytes (the panel's image preview and downloads). */
   async readBytes(slug: string, path: string): Promise<SkillPackResult<Buffer>> {
     const target = this.fileOf(slug, path)
@@ -662,6 +720,11 @@ export interface WorkflowSkillPacks {
   /** Import one uploaded file. Without an explicit bucket the extension picks
    * it (`defaultBucketFor`), and the resolved path comes back to the caller. */
   importFile(id: string, file: string, bytes: Buffer, bucket?: string): Promise<SkillPackResult<{ path: string; pack: WorkflowSkillPack }>>
+  /** Bulk restore path: every entry's `path` is already bucket-qualified
+   * (`references/x.txt` or `SKILL.md`). One limit check for the whole batch —
+   * see {@link SkillPackStore.writeMany} for why per-file checks are not
+   * good enough at 1000-file scale. */
+  importFiles(id: string, entries: ReadonlyArray<{ path: string; bytes: Buffer }>): Promise<SkillPackResult<WorkflowSkillPack>>
   writeFile(id: string, path: string, content: string): Promise<SkillPackResult<WorkflowSkillPack>>
   renameFile(id: string, from: string, to: string): Promise<SkillPackResult<WorkflowSkillPack>>
   deleteFile(id: string, path: string): Promise<SkillPackResult<WorkflowSkillPack>>
@@ -801,6 +864,12 @@ export function createWorkflowSkillPacks(host: SkillPackHost): WorkflowSkillPack
       const resolved = await resolvePack(id)
       if (!resolved.ok) return resolved
       return afterMutation(id, packs.write(resolved.value.slug, path, content))
+    },
+
+    async importFiles(id, entries) {
+      const resolved = await resolvePack(id)
+      if (!resolved.ok) return resolved
+      return afterMutation(id, packs.writeMany(resolved.value.slug, entries))
     },
 
     async renameFile(id, from, to) {
