@@ -7,6 +7,8 @@
  * Reroute / bypassed (mode 4) nodes are skipped with their links rewired.
  * Nodes the conversion cannot represent fail loudly with the offending type.
  */
+import { normalizeLinks, type GraphLink } from './graph.js'
+
 export interface ApiWorkflow {
   [nodeId: string]: { class_type: string; inputs: Record<string, unknown> }
 }
@@ -23,9 +25,6 @@ interface GraphNode {
   outputs?: Array<{ links: Array<number | null> }>
   widgets_values?: unknown
 }
-
-/** ComfyUI link row: [linkId, originId, originSlot, targetId, targetSlot, type]. */
-type GraphLink = [number, number, number, number, number, string]
 
 /** Node types that exist only in the UI and carry no data flow. */
 const UI_ONLY = new Set(['Note', 'StickyNote', 'Reroute', 'Fast Groups Bypasser (rgthree)'])
@@ -260,11 +259,10 @@ export function convertGraphToApi(
   })
 
   const links = new Map<number, GraphLink>()
-  for (const raw of rawLinks) {
-    if (!Array.isArray(raw) || raw.length < 6) continue
-    const link = raw as unknown as GraphLink
-    if (typeof link[0] === 'number') links.set(link[0], link)
-  }
+  // normalizeLinks accepts both the legacy positional rows and the v0.4
+  // frontend's object entries; anything unreadable is skipped, exactly like
+  // the old array-only guard did.
+  for (const link of normalizeLinks(rawLinks)) links.set(link[0], link)
   const nodesById = new Map(nodes.map((node) => [node.id, node]))
   const included = options?.includeNodeIds
   const candidates = included !== undefined ? nodes.filter((node) => included.has(node.id)) : nodes

@@ -61,10 +61,21 @@ interface CredentialsService {
   resolve(ref: string): Promise<{ value: string; source: string } | undefined>
 }
 
-/** Structural slice of the settings service. */
+/** Structural slice of the settings service. `installSection` arrived with
+ * the 0.1.2 line and is checked at runtime: some hosts report a settings
+ * service without it (Issue #4 — the client still renders the section, but a
+ * save would fail with "namespace not registered"), and a throwing inject
+ * callback must never take the plugin down. */
 interface SettingsService {
   readonly writable: boolean
   update(ns: unknown, patch: Record<string, unknown>): Promise<void>
+  installSection?(
+    ctx: Context,
+    ns: string,
+    schema: unknown,
+    initial: unknown,
+    hooks: { setSource: (current: unknown) => void; onChange: () => void },
+  ): unknown
 }
 
 async function resolveApiKey(ctx: Context, envName: string): Promise<string | undefined> {
@@ -241,7 +252,9 @@ export async function apply(ctx: Context, entryConfig: Partial<ConfigType>): Pro
       const entries = await client.listUserData('workflows')
       const library = await store.listWorkflows()
       return entries
-        .filter((entry) => entry.type === 'file' && entry.name.endsWith('.json'))
+        // Dot entries are ComfyUI bookkeeping (e.g. `.index.json`), not graphs.
+        .filter((entry) => entry.type === 'file' && entry.name.endsWith('.json')
+          && entry.name.split(/[\\/]/).every((segment) => !segment.startsWith('.')))
         .map((entry) => {
           const derived = library.filter((workflow) => workflow.comfyuiFile === entry.name)
           return {
@@ -339,7 +352,12 @@ export async function apply(ctx: Context, entryConfig: Partial<ConfigType>): Pro
   // service simply never registers it, and the entry config stands as composed.
   let source: () => ConfigType = () => resolved
   ctx.inject(['settings'], (settingsCtx) => {
-    settingsCtx.settings.installSection(ctx, COMFYUI_NS, Config, resolved, {
+    const settings = settingsCtx.settings as SettingsService
+    if (typeof settings.installSection !== 'function') {
+      ctx.logger.warn('comfyui: settings service lacks installSection — settings page stays read-only, entry config stands')
+      return
+    }
+    settings.installSection(ctx, COMFYUI_NS, Config, resolved, {
       setSource: (current) => {
         source = current as () => ConfigType
       },

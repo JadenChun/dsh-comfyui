@@ -6,6 +6,8 @@
  * the extract (拆分) choices in the panel and the agent-facing skill.
  */
 
+import { normalizeLinks } from './graph.js'
+
 export interface GraphNodeLike {
   id: number
   type: string
@@ -21,7 +23,9 @@ export interface GraphGroupLike {
 
 export interface GraphLike {
   nodes: GraphNodeLike[]
-  links: Array<[number, number, number, number, number, string] | number[]>
+  /** Saved rows are positional or object entries depending on the frontend
+   * version — always consumed through {@link normalizeLinks}. */
+  links: unknown[]
   groups?: GraphGroupLike[]
 }
 
@@ -77,7 +81,7 @@ export function analyzeGraph(graph: unknown): GraphAnalysis | { ok: false; error
     return { ok: false, error: '无法解析图文件（缺少 nodes/links）' }
   }
   const nodes = graph.nodes as GraphNodeLike[]
-  const links = graph.links as Array<number[]>
+  const links = normalizeLinks(graph.links)
   const groups = Array.isArray(graph.groups) ? (graph.groups as GraphGroupLike[]) : []
 
   const active = nodes.filter((node) => node.mode !== 4)

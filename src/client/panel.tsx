@@ -182,11 +182,16 @@ interface ComponentInfo {
 
 /** Canvas analysis result for the extract dialog. */
 interface GraphAnalysis {
+  ok: true
   components: ComponentInfo[]
   isolated: Array<{ id: number; type: string }>
   bypassedCount: number
   mode: 'single' | 'multi'
 }
+
+/** The analyze route wraps the host result, which itself is a union: a
+ * non-graph file (e.g. ComfyUI's `.index.json`) yields the nested failure. */
+type AnalyzePayload = { ok: boolean; error?: string; analysis?: GraphAnalysis | { ok: false; error: string } }
 
 type ExtractMode = 'all' | 'split' | 'main'
 
@@ -2619,10 +2624,11 @@ function ExtractDialog(props: {
   useEffect(() => {
     if (state.analysis === null && state.error === null) {
       let cancelled = false
-      void getJson<{ ok: boolean; analysis?: GraphAnalysis; error?: string }>(`/comfyui/comfy-workflows/analyze?file=${encodeURIComponent(state.file)}`)
+      void getJson<AnalyzePayload>(`/comfyui/comfy-workflows/analyze?file=${encodeURIComponent(state.file)}`)
         .then((data) => {
           if (cancelled) return
           if (data.ok !== true || data.analysis === undefined) onUpdate({ ...state, error: data.error ?? 'failed to analyze' })
+          else if (data.analysis.ok !== true) onUpdate({ ...state, error: data.analysis.error })
           else onUpdate({ ...state, analysis: data.analysis, mode: data.analysis.mode === 'single' ? 'all' : 'split' })
         })
         .catch((cause: unknown) => {
