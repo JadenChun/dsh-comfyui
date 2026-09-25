@@ -33,7 +33,8 @@
     "build:host": "tsc -p tsconfig.json",
     "build:client": "tsdown -c tsdown.config.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "test": "npm run build:host && node scripts/test-history-workflow-name.mjs"
   },
   "keywords": [
     "deepseek",
