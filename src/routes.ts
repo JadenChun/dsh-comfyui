@@ -1387,8 +1387,11 @@ export function mountComfyUIRoutes(ctx: Context, runtime: ComfyUIRuntime): (() =
         const client = runtime.createClient(await runtime.getApiKey())
         const tracked = runtime.trackedRuns()
         const trackedBy = new Map(tracked.map((run) => [run.promptId, run]))
-        // Fallback names from the asset index: survives web-server restarts,
-        // which clear the in-memory tracked runs.
+        // Pull newly completed metadata-bearing external jobs (including
+        // comfy-agent-harness MCP runs) into the asset index before naming
+        // the job list. This avoids one getJob/history call per displayed row.
+        await runtime.sweep()
+        // Fallback names from the asset index survive web-server restarts.
         const assets = await runtime.listAssets()
         const assetNameByPrompt = new Map(assets.map((asset) => [asset.promptId, asset.workflowName]))
         const result = await client.getJobs({
