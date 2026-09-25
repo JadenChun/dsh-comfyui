@@ -41,6 +41,29 @@ export interface ComfyUIHistoryEntry {
   }
 }
 
+/** Read workflow.name from ComfyUI history metadata.
+ *
+ * Current ComfyUI stores completed history prompts as a five-element tuple:
+ * [priority, prompt_id, prompt, extra_data, outputs_to_execute]. Older/custom
+ * callers may surface an object with extra_data directly, so accept both.
+ */
+export function nameFromHistoryEntry(entry: ComfyUIHistoryEntry): string | null {
+  const prompt = entry.prompt
+  const extra = Array.isArray(prompt)
+    ? prompt[3]
+    : (typeof prompt === 'object' && prompt !== null
+      ? (prompt as { extra_data?: unknown }).extra_data
+      : undefined)
+
+  const name = (
+    extra as { extra_pnginfo?: { workflow?: { name?: unknown } } } | undefined
+  )?.extra_pnginfo?.workflow?.name
+
+  if (typeof name !== 'string') return null
+  const trimmed = name.trim()
+  return trimmed !== '' ? trimmed : null
+}
+
 /** One entry of ComfyUI's /queue: server-side generation tasks. */
 export interface ComfyUIQueueItem {
   number: number
