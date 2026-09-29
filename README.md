@@ -20,10 +20,10 @@
 >
 > | dsh-comfyui | 配对的 DeepSeek Harness | 说明 |
 > | --- | --- | --- |
-> | **0.4.0（最新，`latest` tag）** | **≥ 0.1.2** | 0.4.0 起使用新版 settings 服务 API |
+> | **0.5.x（最新，`latest` tag）** | **≥ 0.1.2（含 0.1.7、0.2.0-rc.1）** | 0.1.7 起改用 volatile Config 字段；0.1.2–0.1.6 自动回落到 installSection 兼容路径 |
 > | **0.3.x（beta 线，`beta` tag）** | **0.1.1** | 老版本 dsh 请留在 0.3.x 线 |
 >
-> 安装：`dsh plugin --profile web add dsh-comfyui`（装最新 0.4.0）/ `dsh plugin --profile web add dsh-comfyui@beta`（老宿主装 0.3.x）。
+> 安装：`dsh plugin --profile web add dsh-comfyui`（装最新 0.5.x）/ `dsh plugin --profile web add dsh-comfyui@beta`（老宿主装 0.3.x）。
 
 ## 功能
 

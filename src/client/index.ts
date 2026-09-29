@@ -10,6 +10,7 @@ import { ComfyUISettings, type ComfyUISettingsProps } from './settings.tsx'
 import { ComfyUIPanel, type ComfyUIPanelProps } from './panel.tsx'
 import { ComfyUITrigger, type ComfyUITriggerProps } from './trigger.tsx'
 import { injectStyles } from './styles.ts'
+import { panelStore } from './panel-store.ts'
 
 export const name = 'dsh-comfyui'
 export const inject = ['slots']
@@ -29,6 +30,46 @@ export function apply(ctx: ComfyUIClientContext): void {
   // the host locale, so zh/en switching works without a host change.
   const t = makeT(getLang())
   ctx.effect(() => injectStyles(), 'dsh-comfyui: styles')
+
+  ctx.effect(() => {
+    let disposed = false
+    let inFlight = false
+    let timer: number | null = null
+
+    const pollQueue = async (): Promise<void> => {
+      if (disposed || inFlight || document.visibilityState !== 'visible') return
+      inFlight = true
+      try {
+        const response = await fetch('/comfyui/queue', { headers: { accept: 'application/json' } })
+        if (!response.ok) throw new Error(`queue request failed: ${response.status}`)
+        const data = await response.json() as { ok?: boolean; running?: unknown[]; pending?: unknown[] }
+        if (data.ok !== true) throw new Error('queue response not ok')
+        if (!disposed) panelStore.setQueueActivity((data.running?.length ?? 0) + (data.pending?.length ?? 0))
+      } catch {
+        // Keep the last known activity count on transient failures.
+      } finally {
+        inFlight = false
+      }
+    }
+
+    const startPolling = (): void => {
+      if (timer !== null) window.clearInterval(timer)
+      timer = null
+      if (document.visibilityState !== 'visible') return
+      void pollQueue()
+      timer = window.setInterval(() => void pollQueue(), 3_000)
+    }
+
+    const onVisibilityChange = (): void => startPolling()
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    startPolling()
+
+    return () => {
+      disposed = true
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+      if (timer !== null) window.clearInterval(timer)
+    }
+  }, 'dsh-comfyui: queue activity')
 
   ctx.slots.inject('tool.call.toolview', () => ctx.slots.register(
     { name: 'tool.call.toolview', key: 'comfyui_run' },

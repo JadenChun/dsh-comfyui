@@ -56,6 +56,8 @@ export interface ComfyUIRuntime {
   trackedRuns(): QueuedRun[]
   /** Live generation progress for one prompt (from the ComfyUI WebSocket). */
   queueProgress(promptId: string): RunProgress | undefined
+  /** Accept a Manager progress push (loopback, token-checked); false rejects it. */
+  acceptManagerProgress(token: string | undefined, body: unknown): boolean
   /** Saved workflows from the library. */
   listWorkflows(): Promise<StoredWorkflow[]>
   getWorkflow(id: string): Promise<StoredWorkflow | undefined>

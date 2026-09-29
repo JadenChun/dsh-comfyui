@@ -20,10 +20,10 @@
 >
 > | dsh-comfyui | Paired DeepSeek Harness | Notes |
 > | --- | --- | --- |
-> | **0.4.0 (latest, `latest` tag)** | **>= 0.1.2** | From 0.4.0 this plugin uses the new settings service API |
+> | **0.5.x (latest, `latest` tag)** | **>= 0.1.2 (incl. 0.1.7, 0.2.0-rc.1)** | From 0.1.7 the plugin edits volatile Config fields; 0.1.2–0.1.6 fall back to the installSection path |
 > | **0.3.x (beta line, `beta` tag)** | **0.1.1** | On older dsh versions stay on the 0.3.x line |
 >
-> Install: `dsh plugin --profile web add dsh-comfyui` (latest 0.4.0) / `dsh plugin --profile web add dsh-comfyui@beta` (0.3.x for older hosts).
+> Install: `dsh plugin --profile web add dsh-comfyui` (latest 0.5.x) / `dsh plugin --profile web add dsh-comfyui@beta` (0.3.x for older hosts).
 
 ## Features
 

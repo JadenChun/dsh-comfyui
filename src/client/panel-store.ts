@@ -9,6 +9,7 @@ const listeners = new Set<() => void>()
 let open = false
 let tab: PanelTab = 'workflows'
 let assetFilter = ''
+let queueActivity = 0
 
 function emit(): void {
   for (const listener of listeners) listener()
@@ -48,6 +49,14 @@ export const panelStore = {
       emit()
     }
   },
+  getQueueActivity: () => queueActivity,
+  setQueueActivity: (count: number) => {
+    const next = Math.max(0, Math.floor(count))
+    if (queueActivity !== next) {
+      queueActivity = next
+      emit()
+    }
+  },
   subscribe(listener: () => void): () => void {
     listeners.add(listener)
     return () => {
@@ -64,4 +73,9 @@ export function usePanelOpen(): boolean {
 /** React hook reading the active panel tab. */
 export function usePanelTab(): PanelTab {
   return useSyncExternalStore(panelStore.subscribe, panelStore.getTab, panelStore.getTab)
+}
+
+/** React hook reading the number of active ComfyUI queue items. */
+export function useQueueActivity(): number {
+  return useSyncExternalStore(panelStore.subscribe, panelStore.getQueueActivity, panelStore.getQueueActivity)
 }

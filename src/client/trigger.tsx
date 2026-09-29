@@ -4,7 +4,7 @@
  * connection reminder toast shown when the backend cannot reach ComfyUI.
  */
 import { Fragment, createElement as h } from 'react'
-import { panelStore, usePanelOpen } from './panel-store.ts'
+import { panelStore, usePanelOpen, useQueueActivity } from './panel-store.ts'
 import { ConnectionToast, probeConnection } from './connection.tsx'
 
 export interface ComfyUITriggerProps {
@@ -31,11 +31,15 @@ export function ComfyUIIcon(): ReturnType<typeof h> {
  * why the panel stays empty instead of the click appearing to do nothing. */
 export function ComfyUITrigger({ t }: ComfyUITriggerProps): ReturnType<typeof h> {
   const open = usePanelOpen()
+  const queueActivity = useQueueActivity()
+  const queueLabel = queueActivity > 0
+    ? `${t('panelTitle')} · ${t('tabQueue')}: ${queueActivity}`
+    : t('panelTitle')
   return h(Fragment, null,
     h('button', {
       className: 'dsc-trigger',
       title: t('panelTitle'),
-      'aria-label': t('panelTitle'),
+      'aria-label': queueLabel,
       'aria-pressed': open,
       onClick: () => {
         const opening = !panelStore.isOpen()
@@ -45,6 +49,9 @@ export function ComfyUITrigger({ t }: ComfyUITriggerProps): ReturnType<typeof h>
     },
       h('span', { className: 'dsc-trigger-glyph' }, h(ComfyUIIcon)),
       h('span', null, t('panelTitle')),
+      queueActivity > 0
+        ? h('span', { className: 'dsc-trigger-count', 'aria-hidden': true }, queueActivity > 99 ? '99+' : String(queueActivity))
+        : null,
     ),
     h(ConnectionToast, { t }),
   )

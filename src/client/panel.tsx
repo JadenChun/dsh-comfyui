@@ -20,6 +20,9 @@ interface PanelGeom {
 }
 
 const GEOM_KEY = 'dsh-comfyui-panel-geom'
+const PANEL_MIN_WIDTH = 300
+const PANEL_MAX_WIDTH = 560
+const PANEL_MIN_HEIGHT = 200
 
 function loadGeom(): PanelGeom {
   try {
@@ -29,8 +32,8 @@ function loadGeom(): PanelGeom {
     const geom: PanelGeom = {}
     if (typeof parsed.x === 'number') geom.x = parsed.x
     if (typeof parsed.y === 'number') geom.y = parsed.y
-    if (typeof parsed.width === 'number' && parsed.width >= 300) geom.width = parsed.width
-    if (typeof parsed.height === 'number' && parsed.height >= 200) geom.height = parsed.height
+    if (typeof parsed.width === 'number' && parsed.width >= PANEL_MIN_WIDTH) geom.width = parsed.width
+    if (typeof parsed.height === 'number' && parsed.height >= PANEL_MIN_HEIGHT) geom.height = parsed.height
     return geom
   } catch {
     return {}
@@ -70,10 +73,13 @@ function clampPos(x: number, y: number, width: number, vw: number, vh: number): 
  * unchanged; geometry already inside the safe area keeps its object identity
  * so callers can skip pointless re-renders. */
 function healGeom(geom: PanelGeom, vw: number, vh: number): PanelGeom {
-  if (geom.x === undefined || geom.y === undefined) return geom
-  const pos = clampPos(geom.x, geom.y, geom.width ?? PANEL_WIDTH_FALLBACK, vw, vh)
-  if (pos.x === geom.x && pos.y === geom.y) return geom
-  return { ...geom, x: pos.x, y: pos.y }
+  const healed = geom.width !== undefined && geom.width > PANEL_MAX_WIDTH
+    ? { ...geom, width: PANEL_MAX_WIDTH }
+    : geom
+  if (healed.x === undefined || healed.y === undefined) return healed
+  const pos = clampPos(healed.x, healed.y, healed.width ?? PANEL_WIDTH_FALLBACK, vw, vh)
+  if (pos.x === healed.x && pos.y === healed.y) return healed
+  return { ...healed, x: pos.x, y: pos.y }
 }
 
 interface PointerEventLike {
@@ -216,6 +222,9 @@ interface AssetEntry {
   source: string
   media: MediaItem[]
 }
+
+/** Opens a media sequence in the panel lightbox; `labels` name each item. */
+type PreviewFn = (images: string[], kinds: Array<'image' | 'video' | 'audio' | 'other'>, index: number, labels?: string[]) => void
 
 type JobStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled'
 /** History filter: 'all' shows every terminal task; others narrow it. */
@@ -1075,17 +1084,59 @@ function formatBytes(bytes: number | undefined): string {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
 }
 
+function structurallyEqual(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right)
+}
+
 /** The panel shell: header (drag handle), tabs, and the active tab body. */
 export function ComfyUIPanel({ t }: ComfyUIPanelProps): ReturnType<typeof h> | null {
   const open = usePanelOpen()
   const tab = usePanelTab()
   const [geom, setGeom] = useState<PanelGeom>(() => healGeom(loadGeom(), window.innerWidth, window.innerHeight))
-  const [dragging, setDragging] = useState<'move' | 'resize' | null>(null)
-  const [lightbox, setLightbox] = useState<{ images: string[]; kinds: Array<'image' | 'video' | 'audio' | 'other'>; index: number } | null>(null)
+  const [lightbox, setLightbox] = useState<{ images: string[]; kinds: Array<'image' | 'video' | 'audio' | 'other'>; labels?: string[]; index: number } | null>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
-  const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number; width: number; height: number } | null>(null)
+  const dragRef = useRef<{ mode: 'move' | 'resize'; startX: number; startY: number; origX: number; origY: number; width: number; height: number } | null>(null)
+  const pendingGeomRef = useRef<PanelGeom | null>(null)
+  const frameRef = useRef<number | null>(null)
 
-  const openPreview = (images: string[], kinds: Array<'image' | 'video' | 'audio' | 'other'>, index: number): void => setLightbox({ images, kinds, index })
+  const openPreview = (images: string[], kinds: Array<'image' | 'video' | 'audio' | 'other'>, index: number, labels?: string[]): void => setLightbox({ images, kinds, labels, index })
+
+  const writeGeom = (next: PanelGeom): void => {
+    const panel = panelRef.current
+    if (panel === null) return
+    if (next.x !== undefined) panel.style.left = `${next.x}px`
+    if (next.y !== undefined) panel.style.top = `${next.y}px`
+    panel.style.right = 'auto'
+    panel.style.bottom = 'auto'
+    if (next.width !== undefined) panel.style.width = `${next.width}px`
+    if (next.height !== undefined) panel.style.height = `${next.height}px`
+  }
+
+  const scheduleGeomWrite = (next: PanelGeom): void => {
+    pendingGeomRef.current = next
+    if (frameRef.current !== null) return
+    frameRef.current = window.requestAnimationFrame(() => {
+      frameRef.current = null
+      if (pendingGeomRef.current !== null) writeGeom(pendingGeomRef.current)
+    })
+  }
+
+  const flushPendingGeom = (): PanelGeom | null => {
+    if (frameRef.current !== null) {
+      window.cancelAnimationFrame(frameRef.current)
+      frameRef.current = null
+    }
+    const pending = pendingGeomRef.current
+    if (pending !== null) writeGeom(pending)
+    return pending
+  }
+
+  useEffect(() => () => {
+    if (frameRef.current !== null) window.cancelAnimationFrame(frameRef.current)
+    frameRef.current = null
+    pendingGeomRef.current = null
+    dragRef.current = null
+  }, [])
 
   useEffect(() => {
     if (open) {
@@ -1116,11 +1167,20 @@ export function ComfyUIPanel({ t }: ComfyUIPanelProps): ReturnType<typeof h> | n
     }
     const rect = panelRef.current?.getBoundingClientRect()
     if (rect === undefined) return
+    const baseline: PanelGeom = {
+      x: Math.round(rect.left),
+      y: Math.round(rect.top),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+    }
+    writeGeom(baseline)
+    pendingGeomRef.current = baseline
     dragRef.current = {
+      mode,
       startX: event.clientX, startY: event.clientY,
       origX: rect.left, origY: rect.top, width: rect.width, height: rect.height,
     }
-    setDragging(mode)
+    panelRef.current?.classList.add('dsc-panel--dragging')
     const el = event.currentTarget as HTMLElement | null
     if (el !== null && typeof el.setPointerCapture === 'function') el.setPointerCapture(event.pointerId)
   }
@@ -1128,7 +1188,7 @@ export function ComfyUIPanel({ t }: ComfyUIPanelProps): ReturnType<typeof h> | n
   const moveDrag = (event: PointerEventLike): void => {
     const d = dragRef.current
     if (d === null) return
-    if (dragging === 'move') {
+    if (d.mode === 'move') {
       // Clamp while dragging so the header can never be pushed out of reach.
       const pos = clampPos(
         Math.round(d.origX + event.clientX - d.startX),
@@ -1137,22 +1197,31 @@ export function ComfyUIPanel({ t }: ComfyUIPanelProps): ReturnType<typeof h> | n
         window.innerWidth,
         window.innerHeight,
       )
-      setGeom((prev) => ({ ...prev, x: pos.x, y: pos.y }))
-    } else if (dragging === 'resize') {
-      const width = Math.max(300, Math.min(720, d.width + event.clientX - d.startX))
-      const height = Math.max(200, Math.min(Math.max(300, window.innerHeight - 40), d.height + event.clientY - d.startY))
-      setGeom((prev) => ({ ...prev, width, height }))
+      scheduleGeomWrite({ x: pos.x, y: pos.y, width: d.width, height: d.height })
+    } else {
+      const maxWidth = Math.max(PANEL_MIN_WIDTH, Math.min(PANEL_MAX_WIDTH, window.innerWidth - d.origX - EDGE))
+      const maxHeight = Math.max(PANEL_MIN_HEIGHT, window.innerHeight - d.origY - EDGE)
+      const width = Math.min(maxWidth, Math.max(PANEL_MIN_WIDTH, d.width + event.clientX - d.startX))
+      const height = Math.min(maxHeight, Math.max(PANEL_MIN_HEIGHT, d.height + event.clientY - d.startY))
+      scheduleGeomWrite({
+        x: Math.round(d.origX),
+        y: Math.round(d.origY),
+        width: Math.round(width),
+        height: Math.round(height),
+      })
     }
   }
 
   const endDrag = (): void => {
     if (dragRef.current === null) return
+    const finalGeom = flushPendingGeom()
     dragRef.current = null
-    setDragging(null)
-    setGeom((prev) => {
-      saveGeom(prev)
-      return prev
-    })
+    pendingGeomRef.current = null
+    panelRef.current?.classList.remove('dsc-panel--dragging')
+    if (finalGeom !== null) {
+      setGeom(finalGeom)
+      saveGeom(finalGeom)
+    }
   }
 
   if (!open) return null
@@ -1168,7 +1237,7 @@ export function ComfyUIPanel({ t }: ComfyUIPanelProps): ReturnType<typeof h> | n
   if (geom.height !== undefined) panelStyle.height = `${geom.height}px`
 
   return h('div',
-    { ref: panelRef, className: `dsc-panel${dragging !== null ? ' dsc-panel--dragging' : ''}`, style: panelStyle },
+    { ref: panelRef, className: 'dsc-panel', style: panelStyle },
     h('div', {
       className: 'dsc-panel-head',
       onPointerDown: (event: PointerEventLike) => startDrag(event, 'move'),
@@ -1218,9 +1287,10 @@ export function ComfyUIPanel({ t }: ComfyUIPanelProps): ReturnType<typeof h> | n
       t,
       images: lightbox.images,
       kinds: lightbox.kinds,
+      labels: lightbox.labels,
       index: lightbox.index,
       onClose: () => setLightbox(null),
-      onIndex: (index: number) => setLightbox({ images: lightbox.images, kinds: lightbox.kinds, index }),
+      onIndex: (index: number) => setLightbox({ images: lightbox.images, kinds: lightbox.kinds, labels: lightbox.labels, index }),
     }) : null,
     h('div', {
       className: 'dsc-panel-resize',
@@ -3083,36 +3153,45 @@ function WorkflowView(props: { t: ComfyUIPanelProps['t']; file: string; graph: R
 }
 
 /** Tab 2: asset preview — thumbnails of everything the plugin generated. */
-function AssetsTab({ t, onPreview }: { t: ComfyUIPanelProps['t']; onPreview: (images: string[], kinds: Array<'image' | 'video' | 'audio' | 'other'>, index: number) => void }): ReturnType<typeof h> {
+function AssetsTab({ t, onPreview }: { t: ComfyUIPanelProps['t']; onPreview: PreviewFn }): ReturnType<typeof h> {
   const [assets, setAssets] = useState<AssetEntry[] | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [refreshError, setRefreshError] = useState<string | null>(null)
   const [filter, setFilter] = useState(() => panelStore.getAssetFilter())
   /** Asset awaiting the delete confirmation, if any. */
   const [pendingDelete, setPendingDelete] = useState<AssetEntry | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
+  const requestIdRef = useRef(0)
+  const inFlightRef = useRef(0)
 
-  const load = async (): Promise<void> => {
+  const load = useCallback(async (interval = false): Promise<void> => {
+    if (interval && inFlightRef.current > 0) return
+    const requestId = ++requestIdRef.current
+    inFlightRef.current++
     try {
       const data = await getJson<{ assets: AssetEntry[] }>('/comfyui/assets')
-      setAssets(data.assets)
-      setError(null)
+      if (requestId !== requestIdRef.current) return
+      setAssets((previous) => previous !== null && structurallyEqual(previous, data.assets) ? previous : data.assets)
+      setRefreshError(null)
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
-    }
-  }
-
-  useEffect(() => {
-    let cancelled = false
-    void getJson<{ assets: AssetEntry[] }>('/comfyui/assets').then((data) => {
-      if (!cancelled) setAssets(data.assets)
-    }).catch((cause: unknown) => {
-      if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause))
-    })
-    return () => {
-      cancelled = true
+      if (requestId !== requestIdRef.current) return
+      setRefreshError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      inFlightRef.current--
     }
   }, [])
+
+  // Poll so generations finished outside the plugin (the host sweeps ComfyUI
+  // history into the index on read) show up without reopening the tab.
+  useEffect(() => {
+    void load()
+    const timer = setInterval(() => void load(true), 5_000)
+    return () => {
+      requestIdRef.current++
+      clearInterval(timer)
+    }
+  }, [load])
 
   /** Delete the record and (when the output directory is known) its files. */
   const confirmDelete = async (asset: AssetEntry): Promise<void> => {
@@ -3125,6 +3204,8 @@ function AssetsTab({ t, onPreview }: { t: ComfyUIPanelProps['t']; onPreview: (im
       setNotice(t('assetDeleteDone', { deleted: result.deleted ?? 0 }))
       if (Array.isArray(result.failures) && result.failures.length > 0) {
         setError(result.failures.join('; '))
+      } else {
+        setError(null)
       }
       await load()
     } catch (cause) {
@@ -3135,21 +3216,32 @@ function AssetsTab({ t, onPreview }: { t: ComfyUIPanelProps['t']; onPreview: (im
     }
   }
 
-  if (error !== null && assets === null) return h('div', null, h(ErrorNote, { t, message: error }))
+  if (assets === null && (error !== null || refreshError !== null)) {
+    return h('div', null, h(ErrorNote, { t, message: error ?? refreshError ?? '' }))
+  }
   if (assets === null) return h('div', { className: 'dsc-meta' }, '…')
 
   const names = [...new Set(assets.map((asset) => asset.workflowName ?? ''))]
-  const visible = filter === '' ? assets : assets.filter((asset) => (asset.workflowName ?? '') === filter)
+  // Newest first, regardless of how the index file happens to be ordered.
+  const visible = (filter === '' ? assets : assets.filter((asset) => (asset.workflowName ?? '') === filter))
+    .slice()
+    .sort((a, b) => (b.ts ?? '').localeCompare(a.ts ?? ''))
   // Every media item in the visible grid, in display order, for the lightbox
   // sequence (videos/audio included so clicking a thumbnail can play it).
-  const previewItems = visible.flatMap((asset) => asset.media.map((item) => ({ url: item.url, kind: item.kind })))
+  const previewItems = visible.flatMap((asset) => asset.media.map((item) => ({ url: item.url, kind: item.kind, label: item.filename })))
   const openAsset = (asset: AssetEntry): void => {
     const first = asset.media[0]
     const index = first !== undefined ? previewItems.findIndex((item) => item.url === first.url) : 0
-    onPreview(previewItems.map((item) => item.url), previewItems.map((item) => item.kind), index < 0 ? 0 : index)
+    onPreview(
+      previewItems.map((item) => item.url),
+      previewItems.map((item) => item.kind),
+      index < 0 ? 0 : index,
+      previewItems.map((item) => item.label),
+    )
   }
 
   return h('div', null,
+    refreshError !== null ? h(ErrorNote, { t, message: refreshError }) : null,
     h('div', { className: 'dsc-toolbar' },
       h('select', { className: 'dsc-input dsc-input--inline', value: filter, onChange: (event: { target: { value: string } }) => setFilter(event.target.value) },
         h('option', { value: '' }, t('assetAll')),
@@ -3266,6 +3358,9 @@ function AssetThumb(props: { asset: AssetEntry; t: ComfyUIPanelProps['t']; onCli
             h('span', { className: 'dsc-asset-audio-icon-name', title: first.filename }, first.filename))
         : h('img', { src: first.url, alt: first.filename, loading: 'lazy', onError: () => setBroken(true) }),
     h('div', { className: 'dsc-asset-meta' }, props.asset.workflowName ?? '—'),
+    props.asset.media.length > 1
+      ? h('span', { className: 'dsc-asset-count', title: `${props.asset.media.length}` }, `+${props.asset.media.length - 1}`)
+      : null,
     trash,
   )
 }
@@ -3275,14 +3370,25 @@ function AssetThumb(props: { asset: AssetEntry; t: ComfyUIPanelProps['t']; onCli
  * cards with id, status and progress, plus history filtered by the
  * completed / failed / cancelled chips. Polled every 3 seconds.
  */
-function QueueTab({ t, onPreview }: { t: ComfyUIPanelProps['t']; onPreview: (images: string[], kinds: Array<'image' | 'video' | 'audio' | 'other'>, index: number) => void }): ReturnType<typeof h> {
+function QueueTab({ t, onPreview }: { t: ComfyUIPanelProps['t']; onPreview: PreviewFn }): ReturnType<typeof h> {
   const [filter, setFilter] = useState<JobFilter>('all')
   const [active, setActive] = useState<JobView[] | null>(null)
   const [history, setHistory] = useState<JobView[] | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [refreshError, setRefreshError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const requestIdRef = useRef(0)
+  const mountedRef = useRef(true)
+  const filterRef = useRef(filter)
+  const inFlightByFilterRef = useRef(new Map<JobFilter, number>())
+  filterRef.current = filter
 
-  const load = async (current: JobFilter): Promise<void> => {
+  const load = async (current: JobFilter, interval = false): Promise<void> => {
+    if (!mountedRef.current || current !== filterRef.current) return
+    if (interval && (inFlightByFilterRef.current.get(current) ?? 0) > 0) return
+    const requestId = ++requestIdRef.current
+    inFlightByFilterRef.current.set(current, (inFlightByFilterRef.current.get(current) ?? 0) + 1)
+    const isCurrent = (): boolean => mountedRef.current && requestId === requestIdRef.current && current === filterRef.current
     try {
       const historyStatus = current === 'all' ? 'completed,failed,cancelled' : current
       const [activeData, historyData] = await Promise.all([
@@ -3291,18 +3397,34 @@ function QueueTab({ t, onPreview }: { t: ComfyUIPanelProps['t']; onPreview: (ima
       ])
       if (activeData.ok !== true) throw new Error(activeData.error ?? t('queueError'))
       if (historyData.ok !== true) throw new Error(historyData.error ?? t('queueError'))
+      if (!isCurrent()) return
       // Active queue: earliest submitted first (running on top, later joins append below).
-      setActive([...(activeData.jobs ?? [])].sort((a, b) => (a.createTime ?? 0) - (b.createTime ?? 0)))
-      setHistory(historyData.jobs)
-      setError(null)
+      const nextActive = [...(activeData.jobs ?? [])].sort((a, b) => (a.createTime ?? 0) - (b.createTime ?? 0))
+      setActive((previous) => previous !== null && structurallyEqual(previous, nextActive) ? previous : nextActive)
+      setHistory((previous) => previous !== null && structurallyEqual(previous, historyData.jobs) ? previous : historyData.jobs)
+      setRefreshError(null)
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
+      if (!isCurrent()) return
+      const message = cause instanceof Error ? cause.message : String(cause)
+      setRefreshError(message)
+    } finally {
+      const remaining = (inFlightByFilterRef.current.get(current) ?? 1) - 1
+      if (remaining === 0) inFlightByFilterRef.current.delete(current)
+      else inFlightByFilterRef.current.set(current, remaining)
     }
   }
 
   useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      requestIdRef.current++
+    }
+  }, [])
+
+  useEffect(() => {
     void load(filter)
-    const timer = setInterval(() => void load(filter), 3_000)
+    const timer = setInterval(() => void load(filter, true), 3_000)
     return () => clearInterval(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filter])
@@ -3312,7 +3434,8 @@ function QueueTab({ t, onPreview }: { t: ComfyUIPanelProps['t']; onPreview: (ima
     try {
       const data = (await postJson('/comfyui/jobs/actions', payload)) as { ok: boolean; error?: string }
       if (data.ok !== true) throw new Error(data.error ?? 'action failed')
-      await load(filter)
+      setError(null)
+      await load(filterRef.current)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
@@ -3320,22 +3443,38 @@ function QueueTab({ t, onPreview }: { t: ComfyUIPanelProps['t']; onPreview: (ima
     }
   }
 
-  if (error !== null) return h('div', null, h(ErrorNote, { t, message: error }))
+  if ((error !== null || refreshError !== null) && (active === null || history === null)) {
+    return h('div', null, h(ErrorNote, { t, message: error ?? refreshError ?? '' }))
+  }
   if (active === null || history === null) return h('div', { className: 'dsc-meta' }, '…')
 
-  // Preview image sequence over the history list, plus each job's position in it.
-  const historyPreviewUrls = history.map(previewUrlOf)
-  const previewImages = historyPreviewUrls.filter((url): url is string => url !== null)
-  const previewPrefix: number[] = []
-  {
-    let acc = 0
-    for (const url of historyPreviewUrls) {
-      previewPrefix.push(acc)
-      if (url !== null) acc += 1
+  // Open one job's *full* output set (a batch run yields several files, but
+  // /api/jobs only exposes a single preview thumbnail) in the lightbox.
+  const openJobMedia = async (job: JobView): Promise<void> => {
+    try {
+      const data = await getJson<{ ok?: boolean; media?: MediaItem[]; error?: string }>(
+        `/comfyui/jobs/media?promptId=${encodeURIComponent(job.id)}`,
+      )
+      const media = data.media ?? []
+      if (data.ok !== true || media.length === 0) {
+        setError(data.error ?? t('cardEmpty'))
+        return
+      }
+      setError(null)
+      onPreview(
+        media.map((item) => item.url),
+        media.map((item) => item.kind),
+        0,
+        media.map((item) => item.filename),
+      )
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
     }
   }
 
   return h('div', { className: 'dsc-list' },
+    error !== null ? h(ErrorNote, { t, message: error }) : null,
+    refreshError !== null ? h(ErrorNote, { t, message: refreshError }) : null,
     h('div', { className: 'dsc-queue-actions' },
       h('button', { className: 'dsc-btn', onClick: () => void act({ action: 'clear' }), disabled: busy }, t('jobClearQueue')),
       h('button', { className: 'dsc-btn', onClick: () => void act({ action: 'clearHistory' }), disabled: busy }, t('jobClearHistory')),
@@ -3357,22 +3496,20 @@ function QueueTab({ t, onPreview }: { t: ComfyUIPanelProps['t']; onPreview: (ima
             h('button', {
               key: item.key,
               className: `dsc-chip${filter === item.key ? ' dsc-chip--active' : ''}`,
-              onClick: () => setFilter(item.key),
+              onClick: () => { filterRef.current = item.key; setFilter(item.key) },
               disabled: busy,
             }, t(item.label))),
         ),
       ),
       history.length === 0
         ? h('div', { className: 'dsc-meta' }, t('queueEmpty'))
-        : h('div', { className: 'dsc-list' }, history.map((job, index) => h(JobRow, {
+        : h('div', { className: 'dsc-list' }, history.map((job) => h(JobRow, {
             key: job.id,
             job,
             t,
             busy,
             act,
-            onPreview: historyPreviewUrls[index] !== null && previewImages.length > 0
-              ? () => onPreview(previewImages, previewImages.map(() => 'image' as const), previewPrefix[index]!)
-              : undefined,
+            onPreview: previewUrlOf(job) !== null ? () => { void openJobMedia(job) } : undefined,
           }))),
     ),
   )
@@ -3437,13 +3574,18 @@ function JobRow(props: {
 
   return h('div', { className: `dsc-job-item${statusClass}` },
     preview !== null
-      ? h('img', {
-          src: preview,
-          alt: '',
-          loading: 'lazy',
-          className: onPreview !== undefined ? 'dsc-job-preview dsc-job-preview--clickable' : 'dsc-job-preview',
-          onClick: onPreview,
-        })
+      ? h('span', { className: 'dsc-job-preview-wrap' },
+          h('img', {
+            src: preview,
+            alt: '',
+            loading: 'lazy',
+            className: onPreview !== undefined ? 'dsc-job-preview dsc-job-preview--clickable' : 'dsc-job-preview',
+            onClick: onPreview,
+          }),
+          job.outputsCount > 1
+            ? h('span', { className: 'dsc-job-preview-badge', title: `${job.outputsCount}` }, `+${job.outputsCount - 1}`)
+            : null,
+        )
       : null,
     h('div', { className: 'dsc-job-main' },
       h('div', { className: 'dsc-job-name', title: name ?? undefined },

@@ -62,6 +62,7 @@ select.dsc-input option { background: var(--dsw-alias-bg-layer-1); color: var(--
 .dsc-trigger:hover { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-layer-1); border-color: var(--dsw-alias-border-l1); }
 .dsc-trigger[aria-pressed='true'] { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-layer-2); }
 .dsc-trigger-glyph { font-size: 13px; line-height: 1; }
+.dsc-trigger-count { min-width: 18px; height: 16px; padding: 0 4px; box-sizing: border-box; border-radius: 999px; background: var(--dsw-alias-brand-primary); color: #fff; font-size: 10px; line-height: 16px; text-align: center; }
 /* --- connection reminder toast: fixed at the top of the page, mounted by the
    header trigger when the backend probe cannot reach ComfyUI. The probing
    state fades in after a short delay so a fast successful probe never paints;
@@ -239,6 +240,8 @@ select.dsc-input option { background: var(--dsw-alias-bg-layer-1); color: var(--
   font-size: 11px; color: var(--dsw-alias-label-secondary); text-align: center;
 }
 .dsc-asset-meta { padding: 3px 6px; font-size: 11px; color: var(--dsw-alias-label-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Batch indicator: how many extra files this generation produced. */
+.dsc-asset-count { position: absolute; top: 4px; left: 4px; min-width: 20px; height: 18px; padding: 0 5px; box-sizing: border-box; border-radius: 999px; background: rgba(12, 14, 18, 0.82); border: 1px solid rgba(255, 255, 255, 0.28); color: #fff; font-size: 10px; line-height: 16px; text-align: center; }
 /* confirmation modal (asset deletion) */
 .dsc-confirm { width: min(360px, 88vw); display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; border-radius: 12px; border: 1px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); box-shadow: 0 12px 40px rgba(0, 0, 0, 0.32); }
 .dsc-confirm-title { font-weight: 600; font-size: 14px; }
@@ -362,14 +365,25 @@ video.dsc-picker-player { max-height: 180px; }
 .dsc-job-item--failed { border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 55%, transparent); }
 .dsc-job-item--cancelled { border-color: var(--dsw-alias-border-l2); opacity: 0.85; }
 .dsc-badge--status { flex: none; font-weight: 600; }
+.dsc-job-preview-wrap { position: relative; flex: none; display: inline-flex; }
 .dsc-job-preview { width: 56px; height: 56px; flex: none; border-radius: 6px; object-fit: cover; border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-2); }
 .dsc-job-preview--clickable { cursor: zoom-in; }
+/* Batch indicator on a job thumbnail: extra files beyond the preview. */
+.dsc-job-preview-badge { position: absolute; right: -5px; bottom: -5px; min-width: 20px; height: 18px; padding: 0 5px; box-sizing: border-box; border-radius: 999px; background: rgba(12, 14, 18, 0.88); border: 1px solid var(--dsw-alias-border-l2); color: #fff; font-size: 10px; line-height: 16px; text-align: center; }
 /* --- lightbox: floating local panel, no full-screen dim --- */
 .dsc-lightbox { position: fixed; inset: 0; z-index: 9999; background: transparent; display: flex; align-items: center; justify-content: center; }
 .dsc-lightbox-body { position: relative; display: flex; flex-direction: column; align-items: center; gap: 10px; width: 90vw; padding: 12px 12px 10px; background: rgba(12, 14, 18, 0.88); border: 1px solid var(--dsw-alias-border-l2); border-radius: 14px; box-shadow: 0 12px 48px rgba(0, 0, 0, 0.45); }
 .dsc-lightbox-img { width: 100%; height: 80vh; object-fit: contain; border-radius: 8px; }
 .dsc-lightbox-media { max-width: 100%; max-height: 80vh; border-radius: 8px; }
 .dsc-lightbox-meta { display: flex; align-items: center; gap: 14px; color: rgba(255, 255, 255, 0.75); font-size: 12px; }
+.dsc-lightbox-name { max-width: 42vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: rgba(255, 255, 255, 0.85); }
+/* Batch filmstrip: pick any item in a multi-output run directly. */
+.dsc-lightbox-strip { display: flex; gap: 6px; max-width: 100%; overflow-x: auto; padding: 2px 2px 0; }
+.dsc-lightbox-strip-item { flex: none; width: 56px; height: 56px; padding: 0; border: 2px solid transparent; border-radius: 6px; background: rgba(255, 255, 255, 0.06); cursor: pointer; overflow: hidden; display: flex; align-items: center; justify-content: center; color: #fff; }
+.dsc-lightbox-strip-item:hover { border-color: rgba(255, 255, 255, 0.4); }
+.dsc-lightbox-strip-item--active { border-color: var(--dsw-alias-brand-primary); }
+.dsc-lightbox-strip-thumb { width: 100%; height: 100%; object-fit: cover; display: block; }
+.dsc-lightbox-strip-glyph { font-size: 20px; line-height: 1; }
 .dsc-lightbox-download { border: 1px solid rgba(255, 255, 255, 0.35); border-radius: 999px; padding: 5px 16px; color: #fff; font-size: 12px; text-decoration: none; display: inline-block; }
 .dsc-lightbox-download:hover { background: rgba(255, 255, 255, 0.12); }
 .dsc-lightbox-close { position: absolute; top: clamp(4px, 0.6vw, 14px); right: clamp(4px, 0.6vw, 14px); z-index: 3; width: clamp(28px, 2.2vw, 48px); height: clamp(28px, 2.2vw, 48px); border-radius: 50%; border: 1px solid rgba(255, 255, 255, 0.35); background: transparent; color: #fff; font-size: clamp(13px, 1.1vw, 22px); line-height: 1; cursor: pointer; display: flex; align-items: center; justify-content: center; }

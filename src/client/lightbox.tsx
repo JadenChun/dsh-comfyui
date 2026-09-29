@@ -10,13 +10,17 @@ export interface LightboxProps {
   images: string[]
   /** Per-image media kind, parallel to `images`; omitted defaults to image. */
   kinds?: Array<'image' | 'video' | 'audio' | 'other'>
+  /** Optional per-image labels (file names) shown in the meta row and strip. */
+  labels?: string[]
   index: number
   onClose: () => void
   onIndex: (index: number) => void
 }
 
-/** Full-screen media overlay with prev/next navigation. */
-export function Lightbox({ t, images, kinds, index, onClose, onIndex }: LightboxProps): ReturnType<typeof h> | null {
+/** Full-screen media overlay with prev/next navigation. When more than one
+ * item is present (e.g. a batch run), a thumbnail strip lets the user pick any
+ * item directly instead of only stepping through them. */
+export function Lightbox({ t, images, kinds, labels, index, onClose, onIndex }: LightboxProps): ReturnType<typeof h> | null {
   const count = images.length
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
@@ -54,8 +58,27 @@ export function Lightbox({ t, images, kinds, index, onClose, onIndex }: Lightbox
       media,
       h('div', { className: 'dsc-lightbox-meta' },
         h('span', null, `${index + 1} / ${count}`),
+        labels?.[index] !== undefined ? h('span', { className: 'dsc-lightbox-name', title: labels[index] }, labels[index]) : null,
         h('a', { className: 'dsc-lightbox-download', href: src, download: '', target: '_blank', rel: 'noreferrer' }, t('cardDownload')),
       ),
+      count > 1
+        ? h('div', { className: 'dsc-lightbox-strip' },
+            images.map((url, itemIndex) => {
+              const itemKind = kinds?.[itemIndex] ?? 'image'
+              return h('button', {
+                key: `${itemIndex}:${url}`,
+                className: itemIndex === index ? 'dsc-lightbox-strip-item dsc-lightbox-strip-item--active' : 'dsc-lightbox-strip-item',
+                title: labels?.[itemIndex] ?? `${itemIndex + 1}`,
+                'aria-label': labels?.[itemIndex] ?? `${itemIndex + 1}`,
+                onClick: (event: { stopPropagation: () => void }) => { event.stopPropagation(); onIndex(itemIndex) },
+              },
+                itemKind === 'image'
+                  ? h('img', { className: 'dsc-lightbox-strip-thumb', src: url, alt: '', loading: 'lazy' })
+                  : h('span', { className: 'dsc-lightbox-strip-glyph' }, itemKind === 'video' ? '▶' : itemKind === 'audio' ? '♪' : '▤'),
+              )
+            }),
+          )
+        : null,
       count > 1
         ? h('button', {
             className: 'dsc-lightbox-nav dsc-lightbox-nav--next',

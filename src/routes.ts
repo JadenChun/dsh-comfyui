@@ -152,6 +152,9 @@ function redact(runtime: ComfyUIRuntime, apiKey: string | undefined): Record<str
     maxMediaItems: config.maxMediaItems,
     mediaHost: config.mediaHost,
     comfyuiDirs: config.comfyuiDirs,
+    managerLlmctlPath: config.managerLlmctlPath,
+    managerWorkspace: config.managerWorkspace,
+    managerPollMs: config.managerPollMs,
     skillsDir: config.skillsDir,
     // The path actually in use, so the page can show where packs land even
     // when skillsDir is empty (the `<dataDir>/skills` default).
@@ -225,6 +228,33 @@ export function mountComfyUIRoutes(ctx: Context, runtime: ComfyUIRuntime): (() =
     handler: withHint(async (_request, response) => {
       sendJson(response, 200, { ok: true })
     }),
+  }))
+
+  // Loopback progress pushes from a running Local Inference Manager. The Manager owns
+  // the ComfyUI socket and POSTs the live snapshot here; the token header is the one
+  // this plugin registered via media.progress.subscribe, so only the Manager is
+  // accepted. The route is intentionally not same-origin (the Manager is a native
+  // process, not a browser) and never records a host hint.
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/comfyui/manager-progress',
+    handler: async (request, response) => {
+      if (!methodIs(request, 'POST')) {
+        sendJson(response, 405, { error: 'method not allowed' })
+        return
+      }
+      let body: unknown
+      try {
+        body = await readJsonBody(request)
+      } catch {
+        sendJson(response, 400, { error: 'invalid JSON body' })
+        return
+      }
+      const header = request.headers['x-llwm-progress-token']
+      const token = Array.isArray(header) ? header[0] : header
+      const ok = runtime.acceptManagerProgress(typeof token === 'string' ? token : undefined, body)
+      sendJson(response, ok ? 200 : 403, { ok })
+    },
   }))
 
   disposers.push(webServer.register({

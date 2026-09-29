@@ -9,13 +9,14 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-settings'
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
-import { Config, type Config as ConfigType } from './config.js'
+import { Config, resolveConfig, type Config as ConfigType } from './config.js'
 import { ComfyUIClient, CLIENT_ID } from './comfyui.js'
 import { ComfyUIStore } from './store.js'
 import { QueueTracker } from './queue.js'
 import { convertGraphToApi } from './convert.js'
 import { analyzeGraph } from './analyze.js'
 import { ProgressTracker } from './progress.js'
+import { ManagerBridge } from './manager.js'
 import { COMFYUI_SKILL } from './skill.js'
 import type { StoredWorkflow } from './store.js'
 import { analyzeWorkflowParameters, applyWorkflowParameters, type Workflow } from './params.js'
@@ -69,6 +70,8 @@ interface CredentialsService {
 interface SettingsService {
   readonly writable: boolean
   update(ns: unknown, patch: Record<string, unknown>): Promise<void>
+  /** dsh 0.1.7+: page policy for a plugin instance; returns the disposer. */
+  configure?(presentation: { auto?: boolean }, owner: Context['fiber']): () => void
   installSection?(
     ctx: Context,
     ns: string,
@@ -101,24 +104,11 @@ function defaultDataDir(): string {
  * The plugin body. The loader validates the entry config against `Config`
  * (defaults applied), then hands the resolved object to apply.
  */
-export async function apply(ctx: Context, entryConfig: Partial<ConfigType>): Promise<void> {
-  const resolved: ConfigType = {
-    baseUrl: entryConfig.baseUrl ?? 'http://127.0.0.1:8188',
-    apiKeyEnv: entryConfig.apiKeyEnv ?? 'COMFYUI_API_KEY',
-    connectTimeoutMs: entryConfig.connectTimeoutMs ?? 10_000,
-    timeoutMs: entryConfig.timeoutMs ?? 900_000,
-    pollIntervalMs: entryConfig.pollIntervalMs ?? 1_000,
-    maxMediaItems: entryConfig.maxMediaItems ?? 12,
-    maxMediaBytes: entryConfig.maxMediaBytes ?? 64 * 1024 * 1024,
-    dataDir: entryConfig.dataDir !== undefined && entryConfig.dataDir !== '' ? entryConfig.dataDir : defaultDataDir(),
-    maxAssets: entryConfig.maxAssets ?? 200,
-    skillsDir: entryConfig.skillsDir ?? '',
-    mediaHost: entryConfig.mediaHost ?? '',
-    outputDir: entryConfig.outputDir ?? '',
-    comfyuiDirs: Array.isArray(entryConfig.comfyuiDirs)
-      ? entryConfig.comfyuiDirs.filter((dir): dir is string => typeof dir === 'string' && dir.trim() !== '')
-      : [],
-  }
+export async function apply(ctx: Context, entryConfig: Partial<Record<keyof ConfigType, unknown>>): Promise<void> {
+  // Volatile fields arrive as references on dsh 0.1.7+ (plain values on older
+  // hosts); `resolved` is the one plain object every consumer reads, refreshed
+  // in place when the Loader commits a settings-page change.
+  const resolved: ConfigType = resolveConfig(entryConfig, defaultDataDir())
 
   const store = new ComfyUIStore(resolved.dataDir, resolved.maxAssets)
   await store.init()
@@ -145,17 +135,52 @@ export async function apply(ctx: Context, entryConfig: Partial<ConfigType>): Pro
   await tracker.init()
   const progress = new ProgressTracker()
 
-  // Best-effort progress feed: listen on the server's WebSocket for `progress`
-  // events. The socket uses the same client id as queued prompts (CLIENT_ID),
-  // so progress events for prompts this plugin submits arrive here; the server
-  // only broadcasts them to the submitting client. Node's global WebSocket
-  // (undici) cannot set auth headers, so a remote server behind an
-  // authenticating proxy simply shows no progress.
+  // Progress source ladder — exactly one is live per prompt:
+  //   push       Manager reachable and POSTing progress to our loopback route;
+  //   poll       Manager reachable but push unavailable/stale (llwmctl poll);
+  //   standalone Manager unreachable, so the plugin's own ComfyUI WebSocket below.
+  // Under push/poll the Manager owns the ComfyUI socket, so prompts are queued with
+  // its client id; standalone queues with the plugin's own id. The submit id follows
+  // the active source, so the two never report the same prompt.
+  let managerCallbackUrl: string | undefined
+  const managerOptions = () => ({
+    llwmctlPath: resolved.managerLlmctlPath,
+    workspace: resolved.managerWorkspace,
+    baseUrl: resolved.baseUrl,
+    pollMs: resolved.managerPollMs,
+    shouldPoll: () => tracker.list().length > 0,
+    callbackUrl: () => managerCallbackUrl,
+  })
+  const manager = new ManagerBridge(managerOptions())
+
+  // Best-effort standalone feed: listen on the server's WebSocket for `progress`
+  // events under the plugin's own client id (CLIENT_ID). It never collides with the
+  // Manager's id, so it stays attached as the fallback whenever the Manager is not the
+  // active source. Node's global WebSocket (undici) cannot set auth headers, so a
+  // remote server behind an authenticating proxy simply shows no progress.
+  const progressUrl = (): string =>
+    resolved.baseUrl.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:').replace(/\/$/, '') + `/ws?clientId=${CLIENT_ID}`
+  let attachedUrl = progressUrl()
   ctx.effect(() => {
-    const wsUrl = resolved.baseUrl.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:').replace(/\/$/, '') + `/ws?clientId=${CLIENT_ID}`
-    progress.attach(wsUrl)
-    return () => progress.dispose()
+    progress.attach(attachedUrl)
+    return () => {
+      progress.dispose()
+      manager.dispose()
+    }
   }, 'dsh-comfyui: progress')
+  /** Pick up a new config in place; re-point the socket and the Manager bridge. */
+  const refreshConfig = (next: ConfigType): void => {
+    Object.assign(resolved, next)
+    manager.reconfigure(managerOptions())
+    attachedUrl = progressUrl()
+    progress.dispose()
+    progress.attach(attachedUrl)
+  }
+  // dsh 0.1.7+: a settings-page save commits volatile values into the same
+  // references without restarting the plugin, then notifies this fiber.
+  ctx.on('loader/volatile-update' as never, (() => {
+    refreshConfig(resolveConfig(entryConfig, defaultDataDir()))
+  }) as never)
 
   const hostHint = createHostHint()
 
@@ -211,13 +236,23 @@ export async function apply(ctx: Context, entryConfig: Partial<ConfigType>): Pro
         // ComfyUI's job metadata derives workflow_id from extra_pnginfo.workflow.id.
         extraData['extra_pnginfo'] = { workflow: { id: meta.workflowId, name: meta.workflowName } }
       }
-      const promptId = await client.queuePrompt(prompt, { extraData })
+      // Queue under the Manager's client id only when the Manager is the active
+      // progress source AND it reports its progress listener is connected, so its
+      // socket receives this prompt's progress. resolveClientId() returns undefined
+      // when the listener is down, so `clientId` stays undefined and ComfyUIClient
+      // falls back to the plugin's own CLIENT_ID for the standalone socket. Never both.
+      const clientId = manager.activeSource ? await manager.resolveClientId() : undefined
+      const promptId = await client.queuePrompt(prompt, { extraData, clientId })
       tracker.track({ promptId, ts: new Date().toISOString(), workflowName: meta.workflowName, source: meta.source })
       return promptId
     },
-    untrack: (promptId) => tracker.untrack(promptId),
+    untrack: (promptId) => {
+      tracker.untrack(promptId)
+      manager.forget(promptId)
+    },
     trackedRuns: () => tracker.list(),
-    queueProgress: (promptId) => progress.get(promptId),
+    queueProgress: (promptId) => manager.get(promptId) ?? progress.get(promptId),
+    acceptManagerProgress: (token, body) => manager.acceptPush(token, body),
     listWorkflows: () => store.listWorkflows(),
     getWorkflow: (id) => store.getWorkflow(id),
     saveWorkflow: (input) => store.saveWorkflow(input),
@@ -353,18 +388,25 @@ export async function apply(ctx: Context, entryConfig: Partial<ConfigType>): Pro
   let source: () => ConfigType = () => resolved
   ctx.inject(['settings'], (settingsCtx) => {
     const settings = settingsCtx.settings as SettingsService
-    if (typeof settings.installSection !== 'function') {
-      ctx.logger.warn('comfyui: settings service lacks installSection — settings page stays read-only, entry config stands')
+    if (typeof settings.installSection === 'function') {
+      // dsh 0.1.2–0.1.5: the section registry keeps its own copy of the values.
+      settings.installSection(ctx, COMFYUI_NS, Config, resolved, {
+        setSource: (current) => {
+          source = current as () => ConfigType
+        },
+        onChange: () => {
+          refreshConfig(resolveConfig(source() as Partial<Record<keyof ConfigType, unknown>>, defaultDataDir()))
+        },
+      })
       return
     }
-    settings.installSection(ctx, COMFYUI_NS, Config, resolved, {
-      setSource: (current) => {
-        source = current as () => ConfigType
-      },
-      onChange: () => {
-        Object.assign(resolved, source())
-      },
-    })
+    // dsh 0.1.7+: forms are projected from the volatile Config fields and a
+    // save arrives through loader/volatile-update above. This plugin ships its
+    // own settings page, so opt out of any auto-generated one.
+    if (typeof settings.configure === 'function') {
+      const configure = settings.configure.bind(settings)
+      settingsCtx.effect(() => configure({ auto: false }, ctx.fiber), 'dsh-comfyui: settings page policy')
+    }
   })
 
   ctx.effect(() => {
@@ -402,7 +444,12 @@ export async function apply(ctx: Context, entryConfig: Partial<ConfigType>): Pro
       // page load the browser pings /comfyui/ping, which records the origin
       // the browser actually uses, so generated media URLs match the user's
       // address (LAN IP, domain, reverse proxy) without any configuration.
-      const webServer = webCtx.get('webServer') as { tapIndex(transform: (html: string) => string): () => void } | undefined
+      const webServer = webCtx.get('webServer') as { port?: number; tapIndex(transform: (html: string) => string): () => void } | undefined
+      // The Manager pushes progress to this loopback route once the web server port
+      // is known; before that the bridge falls back to polling.
+      managerCallbackUrl = webServer?.port !== undefined
+        ? `http://127.0.0.1:${webServer.port}/comfyui/manager-progress`
+        : undefined
       if (webServer !== undefined) {
         disposers.push(webServer.tapIndex((html) => {
           if (html.includes('dsh-comfyui-ping')) return html
@@ -410,6 +457,7 @@ export async function apply(ctx: Context, entryConfig: Partial<ConfigType>): Pro
         }))
       }
       return () => {
+        managerCallbackUrl = undefined
         for (const dispose of disposers) dispose()
       }
     }, 'dsh-comfyui: routes and media proxy')

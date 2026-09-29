@@ -256,11 +256,13 @@ export class ComfyUIClient {
     return data ?? {}
   }
 
-  /** Queue one API-format workflow and return its prompt id. */
+  /** Queue one API-format workflow and return its prompt id. `clientId` overrides
+   * the plugin's own id (used when a running Manager owns progress for a shared
+   * id, so its WebSocket receives this prompt's progress). */
   async queuePrompt(    workflow: unknown,
-    options: { promptId?: string; front?: boolean; extraData?: Record<string, unknown> } = {},
+    options: { promptId?: string; front?: boolean; extraData?: Record<string, unknown>; clientId?: string } = {},
   ): Promise<string> {
-    const payload: Record<string, unknown> = { prompt: workflow, client_id: CLIENT_ID }
+    const payload: Record<string, unknown> = { prompt: workflow, client_id: options.clientId ?? CLIENT_ID }
     if (options.promptId !== undefined) payload['prompt_id'] = options.promptId
     if (options.front === true) payload['front'] = true
     if (options.extraData !== undefined && Object.keys(options.extraData).length > 0) {

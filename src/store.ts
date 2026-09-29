@@ -320,6 +320,22 @@ export class ComfyUIStore {
     return removed
   }
 
+  /** Set workflow names on existing asset records (e.g. history-derived names
+   * for generations ComfyUI stored without one). No-op when nothing changes. */
+  async updateAssetNames(updates: Map<string, string>): Promise<void> {
+    if (updates.size === 0) return
+    const list = await this.listAssets()
+    let changed = false
+    for (const record of list) {
+      const name = updates.get(record.promptId)
+      if (name !== undefined && record.workflowName !== name) {
+        record.workflowName = name
+        changed = true
+      }
+    }
+    if (changed) await writeFile(this.assetsPath, JSON.stringify(list, null, 2) + NEWLINE, 'utf8')
+  }
+
   async appendAsset(record: AssetRecord): Promise<void> {
     const list = await this.listAssets()
     if (list.some((entry) => entry.promptId === record.promptId)) return

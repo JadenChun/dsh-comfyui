@@ -8,7 +8,7 @@
 
 - 包名 `dsh-comfyui`，ESM（`"type": "module"`），Node ≥ 22.19，MIT。
 - 入口：host 侧 `lib/index.js`（由 `src/*.ts` 经 tsc 编译）；浏览器侧 `client/client.js`（由 `src/client/*` 经 tsdown 打包）。
-- peer 依赖：`@deepseek-ai/cordis`（必需）、`@deepseek-ai/dsh-settings`（`^0.1.2-alpha.4`，**必选**——0.4.0 起摘掉 optional，老宿主安装会触发 dshmarket 风险横幅而非静默降级）。运行时依赖只有 `@deepseek-ai/schemastery`。
+- peer 依赖：`@deepseek-ai/cordis`（必需）、`@deepseek-ai/dsh-settings`（**必选**，范围列表式覆盖每条预发布线：`^0.1.2-alpha.4 || ^0.1.5-alpha.1 || ^0.1.6-alpha.1 || ^0.1.7-alpha.1 || ^0.2.0-rc.1`——semver 预发布只匹配自身的 x.y.z，所以逐条列出；老宿主安装会触发 dshmarket 风险横幅而非静默降级）。运行时依赖只有 `@deepseek-ai/schemastery`（^3.18.4，`.volatile()` 自该版起）。
 - `cordis.patch.yml` 把插件以 `id: comfyui` 插入 profile 层栈；`package.json` 的 `dsh` 字段声明 bundle patch 与 client 平台/注入。
 
 ## 常用命令
@@ -56,8 +56,8 @@ Agent ──tools──┐
 
 | 文件 | 职责 |
 | --- | --- |
-| `index.ts` | 插件入口：解析配置、组装 `ComfyUIRuntime`、注册设置节 / 工具 / skill / 路由 / 媒体代理，全部挂在 fiber 上随插件卸载。`export const inject = ['tools']`。设置节经 `ctx.inject(['settings'])` 子 fiber 调 `settings.installSection(ctx, 'comfyui', Config, resolved, { setSource, onChange })` 注册（settings 是可选服务，无该服务的 headless 宿主静默跳过）；hint 文案里的 `settingsNamespace` 已移除，命名空间就是字面量 `'comfyui'`。 |
-| `config.ts` | schemastery 配置 schema（同时供 cordis.yml 入口配置和 `comfyui:` 设置节使用）+ 同形状的 TS 类型。`outputDir` 只走 cordis.yml，留空时删除资产会自行推断 ComfyUI 输出目录。`skillsDir` 指定技能包根目录（留空 = `<dataDir>/skills`，必须绝对路径，相对值忽略；运行时经 getter 现读，设置页改完即生效，但不会自动搬走已有目录）。`comfyuiDirs`（字符串数组，可多填）记录用户本机 ComfyUI 安装目录（目录映射/多实例/便携版），Agent 据此定位 models、自定义节点、TTS 音色库等文件；变更经 `onChange` 热同步到 runtime 配置，无需重启。 |
+| `index.ts` | 插件入口：解析配置、组装 `ComfyUIRuntime`、注册设置节 / 工具 / skill / 路由 / 媒体代理，全部挂在 fiber 上随插件卸载。`export const inject = ['tools']`。设置节经 `ctx.inject(['settings'])` 子 fiber 注册（settings 是可选服务，无该服务的 headless 宿主静默跳过），分两条路径：老宿主（0.1.2–0.1.6，有 `installSection`）走 `settings.installSection(ctx, 'comfyui', Config, resolved, { setSource, onChange })`；新宿主（0.1.7+ / 0.2.0-rc.1，只有 `settings.configure`）表单直接从 volatile Config 字段投影，保存时 Loader 把值写回同一批引用并派发 `loader/volatile-update`，插件监听它调 `refreshConfig` 原地刷新 `resolved`（baseUrl 变了顺带重连 progress WS），并用 `configure({ auto: false })` 关掉自动生成页（插件自带设置页）。命名空间是字面量 `'comfyui'`。 |
+| `config.ts` | schemastery 配置 schema（同时供 cordis.yml 入口配置和 `comfyui:` 设置节使用）+ 同形状的 TS 类型 + `resolveConfig`。使用期字段标 `.volatile()`（baseUrl、apiKeyEnv、超时、轮询、媒体限额、skillsDir、mediaHost、comfyuiDirs）——0.1.7 起 settings 只编辑 volatile 字段，Loader 把改动写回引用而不重启插件；`dataDir` / `maxAssets` / `outputDir` 保持普通字段（store 在启动时据此构建，改了要重启）。`resolveConfig` 把可能是 volatile 引用（`Symbol.for('cosmokit.volatile.write')` + `.get()`，0.1.7+）也可能是普通值（老宿主）的入口配置解成插件读的那一个 plain 对象，`loader/volatile-update` 后再跑一次。`outputDir` 只走 cordis.yml，留空时删除资产会自行推断 ComfyUI 输出目录。`skillsDir` 指定技能包根目录（留空 = `<dataDir>/skills`，必须绝对路径，相对值忽略；运行时经 getter 现读，设置页改完即生效，但不会自动搬走已有目录）。`comfyuiDirs`（字符串数组，可多填）记录用户本机 ComfyUI 安装目录（目录映射/多实例/便携版），Agent 据此定位 models、自定义节点、TTS 音色库等文件；变更热同步到 runtime 配置，无需重启。 |
 | `comfyui.ts` | ComfyUI HTTP 客户端：queuePrompt / history / queue / jobs / userdata / object_info / view / upload / interrupt 等，加上 `collectMedia`、`mediaProxyUrl`、`waitForCompletion`。上传有两个入口：`uploadFile` 转发浏览器原样的 multipart，`uploadMedia` 用 FormData 包好字节再传（`/upload/image` 只吃 multipart，裸 body 会 400）。模块级 `CLIENT_ID` 让排队与 WS 进度同源。 |
 | `store.ts` | 持久化：工作流库、资产索引、加载区加载位（`LoadSlot[]`，`null` = 空位，兼容旧的单图格式）、媒体尺寸、上传哈希、任务跟踪，均为 dataDir 下的 JSON 文件；`skillsRoot` 指向技能包目录树，`updateWorkflowSkill` 单独维护 `skillDir` / `requireSkill`（普通保存不碰这两个字段）。 |
 | `queue.ts` | `QueueTracker`：记住本插件提交过的 prompt，`sweep()` 在读取（queue/assets 路由）时把完成的运行归档进资产索引；无后台定时器。 |

@@ -21,6 +21,9 @@ interface ConfigView {
   maxMediaItems: number
   mediaHost: string
   comfyuiDirs: string[]
+  managerLlmctlPath: string
+  managerWorkspace: string
+  managerPollMs: number
   skillsDir: string
   /** The path packs actually use, including the `<dataDir>/skills` default. */
   skillsRoot: string
@@ -39,6 +42,9 @@ export function ComfyUISettings({ t }: ComfyUISettingsProps): ReturnType<typeof 
   const [apiKeyEnv, setApiKeyEnv] = useState('')
   const [mediaHost, setMediaHost] = useState('')
   const [comfyuiDirs, setComfyuiDirs] = useState<string[]>([])
+  const [managerLlmctlPath, setManagerLlmctlPath] = useState('')
+  const [managerWorkspace, setManagerWorkspace] = useState('')
+  const [managerPollMs, setManagerPollMs] = useState('2000')
   const [skillsDir, setSkillsDir] = useState('')
   const [loadError, setLoadError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
@@ -56,6 +62,9 @@ export function ComfyUISettings({ t }: ComfyUISettingsProps): ReturnType<typeof 
       setApiKeyEnv(view.apiKeyEnv)
       setMediaHost(view.mediaHost ?? '')
       setComfyuiDirs(Array.isArray(view.comfyuiDirs) ? view.comfyuiDirs : [])
+      setManagerLlmctlPath(view.managerLlmctlPath ?? '')
+      setManagerWorkspace(view.managerWorkspace ?? '')
+      setManagerPollMs(String(view.managerPollMs ?? 2000))
       setSkillsDir(view.skillsDir ?? '')
     }).catch((error: unknown) => {
       if (cancelled) return
@@ -72,13 +81,16 @@ export function ComfyUISettings({ t }: ComfyUISettingsProps): ReturnType<typeof 
     try {
       // Trim blanks and drop empty rows before persisting.
       const dirs = comfyuiDirs.map((dir) => dir.trim()).filter((dir) => dir !== '')
-      const payload = (await postJson('/comfyui/config', { patch: { baseUrl, apiKeyEnv, mediaHost, comfyuiDirs: dirs, skillsDir: skillsDir.trim() } })) as { config?: ConfigView }
+      const payload = (await postJson('/comfyui/config', { patch: { baseUrl, apiKeyEnv, mediaHost, comfyuiDirs: dirs, skillsDir: skillsDir.trim(), managerLlmctlPath: managerLlmctlPath.trim(), managerWorkspace: managerWorkspace.trim(), managerPollMs: Number(managerPollMs) || 2000 } })) as { config?: ConfigView }
       if (payload.config !== undefined) {
         setConfig(payload.config)
         setBaseUrl(payload.config.baseUrl)
         setApiKeyEnv(payload.config.apiKeyEnv)
         setMediaHost(payload.config.mediaHost ?? '')
         setComfyuiDirs(payload.config.comfyuiDirs ?? [])
+        setManagerLlmctlPath(payload.config.managerLlmctlPath ?? '')
+        setManagerWorkspace(payload.config.managerWorkspace ?? '')
+        setManagerPollMs(String(payload.config.managerPollMs ?? 2000))
         setSkillsDir(payload.config.skillsDir ?? '')
       }
       setSaveState('saved')
@@ -201,6 +213,30 @@ export function ComfyUISettings({ t }: ComfyUISettingsProps): ReturnType<typeof 
         },
       }, t('comfyuiDirAdd')),
       h('div', { className: 'dsc-hint' }, t('comfyuiDirsHint')),
+    ),
+    h('div', { className: 'dsc-field' },
+      h('label', null, t('managerSync')),
+      h('input', {
+        className: 'dsc-input',
+        value: managerLlmctlPath,
+        placeholder: 'C:\\LocalInferenceManager\\llwmctl.exe',
+        onChange: (event: { target: { value: string } }) => { setManagerLlmctlPath(event.target.value); setSaveState('idle') },
+      }),
+      h('input', {
+        className: 'dsc-input',
+        style: { marginTop: '8px' },
+        value: managerWorkspace,
+        placeholder: 'C:\\LocalInferenceManager\\data',
+        onChange: (event: { target: { value: string } }) => { setManagerWorkspace(event.target.value); setSaveState('idle') },
+      }),
+      h('input', {
+        className: 'dsc-input',
+        style: { marginTop: '8px' },
+        value: managerPollMs,
+        placeholder: '2000',
+        onChange: (event: { target: { value: string } }) => { setManagerPollMs(event.target.value); setSaveState('idle') },
+      }),
+      h('div', { className: 'dsc-hint' }, t('managerSyncHint')),
     ),
     h('div', { className: 'dsc-field' },
       h('label', null, t('skillsDir')),
