@@ -223,6 +223,10 @@ export async function apply(ctx: Context, entryConfig: Partial<Record<keyof Conf
       }
     },
     queue: async (workflow, meta) => {
+      // Make ComfyUI ready on demand: the Manager reuses a running server, or frees
+      // the GPU and starts it from the stored launch command. Best-effort, so a missing
+      // Manager leaves the queue call below to run in standalone mode against baseUrl.
+      await manager.ensureBackend()
       const client = runtime.createClient(await resolveApiKey(ctx, resolved.apiKeyEnv))
       let prompt = workflow as unknown as Workflow
       if (meta.parameters !== undefined && meta.parameters.length > 0) {

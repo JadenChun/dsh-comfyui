@@ -13,6 +13,11 @@
  *                instead (the caller owns that socket; this bridge reports
  *                active=false so only one source runs at a time).
  *
+ * The same bridge can bring the backend up on demand: ensureBackend() asks the
+ * Manager to make ComfyUI ready (media.backend.ensure), which reuses a running
+ * server or frees the GPU and starts it from the stored launch command. A caller
+ * runs it before queueing so an agent's first call works even when ComfyUI is down.
+ *
  * Everything is best-effort: a missing Manager, a blocked llwmctl, or a slow call
  * leaves progress empty; queueing and completion (detected by polling ComfyUI
  * history) are unaffected.
@@ -30,8 +35,25 @@ const PUSH_STALE_MS = 12_000
 const SUBSCRIBE_TTL_SECONDS = 300
 /** Re-subscribe when the current one is within this window of expiring. */
 const SUBSCRIBE_RENEW_MS = (SUBSCRIBE_TTL_SECONDS - 30) * 1000
+/** How long the Manager may take to make ComfyUI ready; it can cold-start it and free the GPU first. */
+const ENSURE_TIMEOUT_SECONDS = 120
+/** Reuse a successful ensure result this long, and a failed one this long, before retrying. */
+const ENSURE_OK_TTL_MS = 15_000
+const ENSURE_FAIL_TTL_MS = 5_000
 
 export type ManagerProgressMode = 'push' | 'poll' | 'off'
+
+/** Result of asking the Manager to make ComfyUI ready before a prompt is queued. */
+export interface ManagerEnsureResult {
+  /** True when the Manager reports ComfyUI is (now) running. */
+  ensured: boolean
+  /** True when ComfyUI was already running and nothing was started. */
+  alreadyRunning?: boolean
+  /** True when this call started ComfyUI. */
+  started?: boolean
+  /** Why the backend could not be ensured (Manager disabled, unreachable, or start failed). */
+  error?: string
+}
 
 export interface ManagerBridgeOptions {
   /** Path to llwmctl.exe; empty disables the bridge. */
@@ -65,6 +87,9 @@ export class ManagerBridge {
   private active = false
   private timer: ReturnType<typeof setInterval> | null = null
   private busy = false
+  private ensureAt = 0
+  private ensureOk = false
+  private ensureError: string | undefined
 
   constructor(options: ManagerBridgeOptions) {
     this.options = options
@@ -108,6 +133,7 @@ export class ManagerBridge {
       this.clientId = undefined
       this.progress.clear()
       this.reset('off')
+      this.ensureAt = 0
       if (previous !== undefined) void this.unsubscribe(previous)
     }
     if (!wasEnabled || this.timer === null) {
@@ -150,6 +176,41 @@ export class ManagerBridge {
   }
 
   /**
+   * Ask the Manager to make ComfyUI ready before queueing. Reuses a running server,
+   * or frees the GPU and starts it from the stored launch command. Best-effort and
+   * short-cached: a recent success or failure is reused so every prompt in a burst
+   * does not re-probe, and a disabled/unreachable Manager reports ensured=false so
+   * the caller can proceed in standalone mode.
+   */
+  async ensureBackend(): Promise<ManagerEnsureResult> {
+    if (!this.enabled) return { ensured: false, error: 'manager bridge disabled' }
+    const now = Date.now()
+    if (this.ensureAt !== 0 && now - this.ensureAt < (this.ensureOk ? ENSURE_OK_TTL_MS : ENSURE_FAIL_TTL_MS)) {
+      return this.ensureOk ? { ensured: true } : { ensured: false, error: this.ensureError }
+    }
+    try {
+      const result = await this.run([
+        'operations', 'run', 'media.backend.ensure',
+        '--set', `url=${this.options.baseUrl}`,
+        '--set', `timeoutSeconds=${ENSURE_TIMEOUT_SECONDS}`,
+      ])
+      this.ensureAt = Date.now()
+      this.ensureOk = true
+      this.ensureError = undefined
+      return {
+        ensured: true,
+        alreadyRunning: result.alreadyRunning === true,
+        started: result.started === true,
+      }
+    } catch (error) {
+      this.ensureAt = Date.now()
+      this.ensureOk = false
+      this.ensureError = error instanceof Error ? error.message : String(error)
+      return { ensured: false, error: this.ensureError }
+    }
+  }
+
+  /**
    * Accept a Manager progress push. Returns true when the token matched and the
    * payload was applied; the caller answers 403 otherwise.
    */
@@ -170,6 +231,7 @@ export class ManagerBridge {
     this.subscriptionId = undefined
     if (previous !== undefined) void this.unsubscribe(previous)
     this.active = false
+    this.ensureAt = 0
   }
 
   private stopTimer(): void {
